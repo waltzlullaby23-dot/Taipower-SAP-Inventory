@@ -1,0 +1,2 @@
+MaterialMind V2.0.0 - Windows Folder Auto-Sync
+Build date: 2026-09-21

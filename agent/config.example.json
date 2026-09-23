@@ -1,0 +1,11 @@
+{
+  "supabase_url": "https://YOUR_PROJECT.supabase.co",
+  "supabase_publishable_key": "YOUR_PUBLISHABLE_KEY",
+  "watch_folder": "D:\\excel庫存",
+  "scan_interval_seconds": 300,
+  "extensions": [".xlsx", ".xlsm"],
+  "machine_name": "YOUR-PC",
+  "minimum_rows": 20,
+  "max_file_age_days": 30,
+  "auto_import_only_newer_date": true
+}

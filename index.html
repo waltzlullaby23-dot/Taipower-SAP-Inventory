@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MaterialMind V2｜SAP 庫存自動差異分析</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>
+:root{--nav:#12355b;--nav2:#0e2946;--bg:#f4f7fb;--card:#fff;--text:#172033;--muted:#64748b;--line:#dbe3ee;--red:#c62828;--green:#16834a;--orange:#c46b00;--purple:#7048a8}
+*{box-sizing:border-box}body{margin:0;font-family:"Noto Sans TC","Microsoft JhengHei",system-ui,sans-serif;background:var(--bg);color:var(--text)}
+header{background:linear-gradient(135deg,var(--nav),var(--nav2));color:white;padding:18px 24px;display:flex;align-items:center;justify-content:space-between}
+h1{font-size:22px;margin:0 0 4px}.sub{font-size:13px;opacity:.8}
+main{max-width:1500px;margin:auto;padding:18px}
+.toolbar,.cards,.filters{display:flex;gap:10px;flex-wrap:wrap}.toolbar{margin-bottom:14px}
+button,input,select{font:inherit}button{border:0;border-radius:8px;padding:10px 14px;cursor:pointer;background:#e8eef6;color:#18324d;font-weight:600}
+button.primary{background:#12355b;color:white}button.danger{background:#fee2e2;color:#991b1b}button:disabled{opacity:.5;cursor:not-allowed}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:15px 18px;min-width:170px;flex:1}.card .n{font-size:27px;font-weight:800}.card .l{font-size:13px;color:var(--muted)}
+.panel{background:white;border:1px solid var(--line);border-radius:12px;margin-top:14px;overflow:hidden}.panel-head{padding:14px 16px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.filters input,.filters select{border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:white}
+.table-wrap{overflow:auto;max-height:62vh}table{border-collapse:collapse;width:100%;font-size:13px}th,td{padding:10px 11px;border-bottom:1px solid #edf1f5;text-align:left;white-space:nowrap}th{position:sticky;top:0;background:#eef3f8;z-index:1}
+.badge{padding:4px 8px;border-radius:999px;font-weight:700;font-size:12px}.increase{color:var(--green);background:#dcfce7}.decrease{color:var(--red);background:#fee2e2}.new{color:var(--orange);background:#ffedd5}.disappeared{color:var(--purple);background:#f3e8ff}
+#login{min-height:100vh;display:grid;place-items:center;padding:20px}.login-card{background:white;border:1px solid var(--line);border-radius:14px;padding:28px;width:min(430px,100%);box-shadow:0 10px 35px #00000012}.login-card input{width:100%;margin:7px 0;padding:11px;border:1px solid var(--line);border-radius:8px}
+.notice{padding:10px 12px;border-radius:8px;background:#fff7ed;color:#9a3412;font-size:13px}.ok{background:#ecfdf5;color:#166534}.hidden{display:none!important}
+.small{font-size:12px;color:var(--muted)}.user{display:flex;gap:10px;align-items:center;font-size:13px}.error{color:#b91c1c;white-space:pre-wrap}.modal{position:fixed;inset:0;background:#0008;display:grid;place-items:center;padding:20px}.modalbox{background:white;border-radius:12px;max-width:700px;width:100%;max-height:80vh;overflow:auto;padding:20px}
+</style>
+</head>
+<body>
+<section id="login">
+  <div class="login-card">
+    <h1>MaterialMind</h1><p class="small">SAP 材料庫存差異分析系統</p>
+    <div id="configNotice" class="notice hidden"></div>
+    <label>Email</label><input id="email" type="email" autocomplete="username">
+    <label>密碼</label><input id="password" type="password" autocomplete="current-password">
+    <button id="loginBtn" class="primary" style="width:100%;margin-top:8px">登入</button>
+    <div id="loginMsg" class="small" style="margin-top:10px"></div>
+  </div>
+</section>
+
+<section id="app" class="hidden">
+<header>
+  <div><h1>MaterialMind｜SAP 材料庫存差異分析</h1><div class="sub">V2｜Windows 資料夾自動同步＋中央 PostgreSQL＋每日 SAP 全倉庫存差異分析</div></div>
+  <div class="user"><span id="userText"></span><button id="logoutBtn">登出</button></div>
+</header>
+<main>
+  <div class="toolbar">
+    <button id="importBtn" class="primary">＋ 手動補匯 SAP Excel</button>
+    <button id="refreshBtn">重新整理</button>
+    <button id="exportBtn">匯出目前異動 Excel</button>
+  </div>
+  <div id="status" class="notice hidden"></div>
+  <div class="cards">
+    <div class="card"><div class="l">最新快照</div><div class="n" id="latestDate">—</div><div class="small" id="latestFile"></div></div>
+    <div class="card"><div class="l">總異動</div><div class="n" id="totalChanges">0</div></div>
+    <div class="card"><div class="l">增加</div><div class="n" id="increaseCount" style="color:var(--green)">0</div></div>
+    <div class="card"><div class="l">減少</div><div class="n" id="decreaseCount" style="color:var(--red)">0</div></div>
+    <div class="card"><div class="l">新增</div><div class="n" id="newCount" style="color:var(--orange)">0</div></div>
+    <div class="card"><div class="l">消失</div><div class="n" id="disappearedCount" style="color:var(--purple)">0</div></div>
+    <div class="card"><div class="l">自動同步 Agent</div><div class="n" id="agentStatus">—</div><div class="small" id="agentDetail">尚未取得狀態</div></div>
+  </div>
+
+  <section class="panel">
+    <div class="panel-head">
+      <div><b>有變動的材料</b><div class="small" id="compareText">尚無兩份快照</div></div>
+      <div class="filters">
+        <input id="search" placeholder="搜尋料號／材料名稱">
+        <select id="type"><option value="">全部狀態</option><option value="increase">增加</option><option value="decrease">減少</option><option value="new">新增</option><option value="disappeared">消失</option></select>
+        <input id="rating" placeholder="評價">
+        <input id="warehouse" placeholder="儲存地點">
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table><thead><tr><th>狀態</th><th>料號</th><th>材料名稱</th><th>評價</th><th>倉庫</th><th>昨日</th><th>今日</th><th>差異</th><th>安全庫存</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="9" class="small">尚無資料</td></tr></tbody></table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><b>歷史快照</b><button id="loadHistory">載入</button></div>
+    <div class="table-wrap"><table><thead><tr><th>日期</th><th>檔案</th><th>筆數</th><th>匯入時間</th><th>匯入者</th></tr></thead><tbody id="history"><tr><td colspan="5" class="small">按「載入」</td></tr></tbody></table></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><div><b>Windows 自動同步 Agent</b><div class="small">Agent 會自行掃描資料夾；這裡只顯示中央資料庫收到的心跳與最近同步結果。</div></div><button id="refreshAgent">更新狀態</button></div>
+    <div class="table-wrap"><table><thead><tr><th>電腦</th><th>狀態</th><th>最近檔案</th><th>最後同步日期</th><th>最後掃描</th><th>錯誤</th></tr></thead><tbody id="agentRows"><tr><td colspan="6" class="small">尚無 Agent 狀態</td></tr></tbody></table></div>
+  </section>
+</main>
+</section>
+
+<input id="fileInput" type="file" accept=".xlsx,.xls" class="hidden">
+
+<div id="modal" class="modal hidden"><div class="modalbox"><h3>匯入結果</h3><div id="modalBody"></div><button onclick="document.getElementById('modal').classList.add('hidden')" style="margin-top:14px">關閉</button></div></div>
+
+<script src="config.js"></script>
+<script>
+const cfg = window.MATERIALMIND_CONFIG || {};
+let sb = null, currentUser = null, currentChanges = [], currentRole = 'viewer';
+
+function showStatus(msg, ok=false){
+  const el=document.getElementById('status'); el.textContent=msg; el.className='notice '+(ok?'ok':''); el.classList.remove('hidden');
+}
+function clearStatus(){document.getElementById('status').classList.add('hidden')}
+function safeNum(v){ if(v===null||v===undefined||v==="") return 0; const n=Number(String(v).replace(/,/g,'')); return Number.isFinite(n)?n:0; }
+function cleanText(v){return v===null||v===undefined?"":String(v).trim()}
+function normalizePart(v){
+  let s=cleanText(v).replace(/\.0$/,'');
+  const digits=s.replace(/\D/g,'');
+  return digits ? digits.padStart(10,'0') : s;
+}
+function findCol(headers,names){
+  const map=new Map(headers.map(h=>[cleanText(h).toLowerCase(),h]));
+  for(const n of names){const hit=map.get(n.toLowerCase());if(hit!==undefined)return hit}
+  return null;
+}
+function parseDate(v){
+  if(!v) return null;
+  if(v instanceof Date && !isNaN(v)) return v.toISOString().slice(0,10);
+  if(typeof v==="number"){
+    const d=XLSX.SSF.parse_date_code(v);
+    if(d) return `${d.y}-${String(d.m).padStart(2,'0')}-${String(d.d).padStart(2,'0')}`;
+  }
+  const s=cleanText(v).replace(/\//g,'-');
+  const m=s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  return m?`${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`:null;
+}
+async function sha256(file){
+  const buf=await file.arrayBuffer(); const hash=await crypto.subtle.digest('SHA-256',buf);
+  return [...new Uint8Array(hash)].map(x=>x.toString(16).padStart(2,'0')).join('');
+}
+function inferSnapshotDate(file, wb){
+  const n=file.name.match(/(20\d{2})[^\d]?(\d{2})[^\d]?(\d{2})/);
+  if(n) return `${n[1]}-${n[2]}-${n[3]}`;
+  const d=new Date(); return d.toISOString().slice(0,10);
+}
+function parseWorkbook(file){
+  return file.arrayBuffer().then(buf=>{
+    const wb=XLSX.read(buf,{type:'array',cellDates:true});
+    const aliases={
+      part:['物料編號','料號','物料號碼','Material','Material Number'],
+      name:['名稱規範','材料名稱','物料名稱','名稱'],
+      rating:['評價','評價類型','Valuation Type'],
+      warehouse:['儲存地點','倉庫','Storage Location'],
+      bin:['儲格','Storage Bin'],
+      qty:['庫存量','庫存','數量','Unrestricted','Qty'],
+      safety:['安全庫存','Safety Stock'],
+      received:['最後收料日期'],
+      used:['最後使用日期'],
+      unit:['單位']
+    };
+    const all=[];
+    for(const sh of wb.SheetNames){
+      const rows=XLSX.utils.sheet_to_json(wb.Sheets[sh],{defval:"",raw:true});
+      if(!rows.length) continue;
+      const headers=Object.keys(rows[0]);
+      const c={}; for(const k in aliases)c[k]=findCol(headers,aliases[k]);
+      if(!c.part||!c.rating||!c.warehouse||!c.qty) continue;
+      for(const r of rows){
+        const part=normalizePart(r[c.part]); if(!part) continue;
+        all.push({
+          part_no:part, material_name:cleanText(r[c.name]),
+          rating:cleanText(r[c.rating]), warehouse:cleanText(r[c.warehouse]),
+          storage_bin:cleanText(r[c.bin]), quantity:safeNum(r[c.qty]),
+          safety_stock:safeNum(r[c.safety]), received_date:parseDate(r[c.received]),
+          last_used_date:parseDate(r[c.used])
+        });
+      }
+    }
+    // Aggregate only after parsing every sheet.
+    const map=new Map();
+    for(const x of all){
+      const key=[x.part_no,x.rating,x.warehouse,x.storage_bin].join('\u0001');
+      const old=map.get(key);
+      if(old) old.quantity+=x.quantity; else map.set(key,{...x});
+    }
+    return [...map.values()];
+  });
+}
+async function loadConfig(){
+  if(!cfg.SUPABASE_URL || cfg.SUPABASE_URL.includes('YOUR_PROJECT') || !cfg.SUPABASE_PUBLISHABLE_KEY || cfg.SUPABASE_PUBLISHABLE_KEY.includes('YOUR_')){
+    document.getElementById('configNotice').textContent='尚未設定 Supabase。請建立 config.js，填入 Project URL 與 Publishable Key。';
+    document.getElementById('configNotice').classList.remove('hidden');
+    return false;
+  }
+  sb=supabase.createClient(cfg.SUPABASE_URL,cfg.SUPABASE_PUBLISHABLE_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
+  return true;
+}
+async function boot(){
+  if(!await loadConfig()) return;
+  const {data:{session}}=await sb.auth.getSession();
+  if(session) enterApp(session.user);
+  sb.auth.onAuthStateChange((_e,s)=>{if(s)enterApp(s.user);else showLogin()});
+}
+function showLogin(){document.getElementById('login').classList.remove('hidden');document.getElementById('app').classList.add('hidden')}
+async function enterApp(user){
+  currentUser=user; document.getElementById('login').classList.add('hidden'); document.getElementById('app').classList.remove('hidden');
+  document.getElementById('userText').textContent=user.email||user.id;
+  const pr=await sb.from('profiles').select('role,display_name').eq('user_id',user.id).maybeSingle();
+  currentRole=pr.data?.role||'viewer';
+  const canImport=currentRole==='admin'||currentRole==='operator';
+  document.getElementById('importBtn').disabled=!canImport;
+  document.getElementById('importBtn').title=canImport?'手動補匯':'目前帳號只有檢視權限';
+  document.getElementById('userText').textContent=(user.email||user.id)+`｜${currentRole}`;
+  await refreshDashboard();
+  await refreshAgentStatus();
+}
+async function login(){
+  const email=document.getElementById('email').value.trim(), password=document.getElementById('password').value;
+  const msg=document.getElementById('loginMsg'); msg.textContent='登入中…';
+  const {error}=await sb.auth.signInWithPassword({email,password});
+  msg.textContent=error?error.message:'';
+}
+async function refreshDashboard(){
+  clearStatus();
+  const {data,error}=await sb.rpc('get_dashboard');
+  if(error){showStatus('讀取資料失敗：'+error.message);return}
+  const latest=data.latest, c=data.counts||{};
+  document.getElementById('latestDate').textContent=latest?.snapshot_date||'—';
+  document.getElementById('latestFile').textContent=latest?.source_file_name||'';
+  const total=Number(c.increase_count||0)+Number(c.decrease_count||0)+Number(c.new_count||0)+Number(c.disappeared_count||0);
+  document.getElementById('totalChanges').textContent=total;
+  document.getElementById('increaseCount').textContent=c.increase_count||0;
+  document.getElementById('decreaseCount').textContent=c.decrease_count||0;
+  document.getElementById('newCount').textContent=c.new_count||0;
+  document.getElementById('disappearedCount').textContent=c.disappeared_count||0;
+  if(latest){
+    currentChanges=await fetchAllChanges(latest.id);
+
+    document.getElementById('compareText').textContent=`${latest.snapshot_date} 與前一份快照比較`;
+  } else currentChanges=[];
+  renderChanges();
+}
+
+async function fetchAllChanges(snapshotId){
+  const out=[]; let from=0; const page=1000;
+  while(true){
+    const {data,error}=await sb.from('inventory_changes').select('*').eq('to_snapshot_id',snapshotId).order('part_no').range(from,from+page-1);
+    if(error){showStatus('讀取異動資料失敗：'+error.message);break}
+    out.push(...(data||[]));
+    if(!data || data.length<page) break;
+    from+=page;
+  }
+  return out;
+}
+async function refreshAgentStatus(){
+  const {data,error}=await sb.from('agent_status').select('*').order('updated_at',{ascending:false}).limit(20);
+  if(error){document.getElementById('agentRows').innerHTML=`<tr><td colspan="6" class="small">無法讀取 Agent 狀態：${esc(error.message)}</td></tr>`;return}
+  const label={WAITING:'等待新檔',UP_TO_DATE:'已同步',PARSING:'解析中',SYNCED:'同步完成',WARNING:'需人工確認',ERROR:'錯誤'};
+  const rows=data||[];
+  document.getElementById('agentRows').innerHTML=rows.length?rows.map(x=>`<tr><td>${esc(x.machine_name)}</td><td><span class="badge ${x.status==='ERROR'?'decrease':x.status==='WARNING'?'new':'increase'}">${esc(label[x.status]||x.status)}</span></td><td>${esc(x.last_file||'')}</td><td>${esc(x.last_imported_date||'—')}</td><td>${x.last_scan_at?new Date(x.last_scan_at).toLocaleString('zh-TW'):'—'}</td><td class="error">${esc(x.last_error||'')}</td></tr>`).join(''):'<tr><td colspan="6" class="small">尚無 Agent 狀態；請先在 Windows 啟動 Auto-Sync Agent。</td></tr>';
+  const latest=rows[0];
+  document.getElementById('agentStatus').textContent=latest?(label[latest.status]||latest.status):'—';
+  document.getElementById('agentDetail').textContent=latest?`${latest.machine_name}｜${latest.last_file||'尚未發現檔案'}`:'尚未取得狀態';
+}
+function renderChanges(){
+  const q=document.getElementById('search').value.trim().toLowerCase(), type=document.getElementById('type').value;
+  const rating=document.getElementById('rating').value.trim().toLowerCase(), wh=document.getElementById('warehouse').value.trim().toLowerCase();
+  const data=currentChanges.filter(x=>(!q||(x.part_no||'').toLowerCase().includes(q)||(x.material_name||'').toLowerCase().includes(q))&&(!type||x.change_type===type)&&(!rating||(x.rating||'').toLowerCase().includes(rating))&&(!wh||(x.warehouse||'').toLowerCase().includes(wh)));
+  const label={increase:'增加',decrease:'減少',new:'新增',disappeared:'消失'};
+  document.getElementById('rows').innerHTML=data.length?data.map(x=>`<tr>
+    <td><span class="badge ${x.change_type}">${label[x.change_type]}</span></td>
+    <td>${esc(x.part_no)}</td><td>${esc(x.material_name||'')}</td><td>${esc(x.rating)}</td><td>${esc(x.warehouse)}</td>
+    <td>${fmt(x.previous_quantity)}</td><td>${fmt(x.current_quantity)}</td><td><b>${fmt(x.quantity_delta)}</b></td><td>${fmt(x.safety_stock)}</td></tr>`).join(''):'<tr><td colspan="9" class="small">目前篩選條件沒有異動資料</td></tr>';
+}
+function fmt(n){return Number(n||0).toLocaleString('zh-TW',{maximumFractionDigits:3})}
+function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+async function importFile(file){
+  if(!file)return;
+  if(currentRole!=='admin'&&currentRole!=='operator'){showStatus('目前帳號沒有匯入權限。');return;}
+  showStatus('正在解析 SAP Excel…');
+  try{
+    const rows=await parseWorkbook(file);
+    if(!rows.length) throw new Error('找不到可用資料。必要欄位：物料編號、評價、儲存地點、庫存量。');
+    const date=inferSnapshotDate(file);
+    if(!date) throw new Error('檔名沒有可辨識的 YYYYMMDD 日期，為避免錯誤快照日期，本系統拒絕自動判定。請將檔名改成例如 20260921全.xlsx。');
+    const hash=await sha256(file);
+    showStatus(`已解析 ${rows.length.toLocaleString()} 筆，正在寫入中央資料庫…`);
+    const {data,error}=await sb.rpc('import_inventory_snapshot',{p_snapshot_date:date,p_source_file_name:file.name,p_source_file_hash:hash,p_rows:rows});
+    if(error) throw error;
+    document.getElementById('modalBody').innerHTML=`<p>匯入成功。</p><p>日期：<b>${date}</b><br>資料筆數：<b>${data.row_count}</b><br>本次產生異動：<b>${data.change_count}</b></p>`;
+    document.getElementById('modal').classList.remove('hidden');
+    showStatus('匯入完成，資料已寫入中央 PostgreSQL。',true);
+    await refreshDashboard();
+  }catch(e){showStatus('匯入失敗：'+(e.message||e),'');}
+}
+async function loadHistory(){
+  const {data,error}=await sb.from('inventory_snapshots').select('id,snapshot_date,source_file_name,row_count,imported_at,imported_by').order('snapshot_date',{ascending:false}).limit(100);
+  if(error){showStatus(error.message);return}
+  document.getElementById('history').innerHTML=(data||[]).map(x=>`<tr><td>${x.snapshot_date}</td><td>${esc(x.source_file_name)}</td><td>${x.row_count}</td><td>${new Date(x.imported_at).toLocaleString()}</td><td>${esc(x.imported_by)}</td></tr>`).join('')||'<tr><td colspan="5">尚無快照</td></tr>';
+}
+function exportChanges(){
+  if(!currentChanges.length){showStatus('目前沒有可匯出的異動資料。');return}
+  const out=currentChanges.map(x=>({狀態:{increase:'增加',decrease:'減少',new:'新增',disappeared:'消失'}[x.change_type],物料編號:x.part_no,材料名稱:x.material_name,評價:x.rating,儲存地點:x.warehouse,昨日庫存:x.previous_quantity,今日庫存:x.current_quantity,差異:x.quantity_delta,安全庫存:x.safety_stock}));
+  const ws=XLSX.utils.json_to_sheet(out), wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'材料異動');
+  XLSX.writeFile(wb,`MaterialMind_材料異動_${new Date().toISOString().slice(0,10)}.xlsx`);
+}
+document.getElementById('loginBtn').onclick=login;
+document.getElementById('logoutBtn').onclick=()=>sb.auth.signOut();
+document.getElementById('refreshBtn').onclick=async()=>{await refreshDashboard();await refreshAgentStatus()};
+document.getElementById('loadHistory').onclick=loadHistory;
+document.getElementById('exportBtn').onclick=exportChanges;
+document.getElementById('refreshAgent').onclick=refreshAgentStatus;
+document.getElementById('importBtn').onclick=()=>document.getElementById('fileInput').click();
+document.getElementById('fileInput').onchange=e=>{importFile(e.target.files[0]);e.target.value=''};
+setInterval(async()=>{if(currentUser){await refreshDashboard();await refreshAgentStatus()}},60000);
+['search','type','rating','warehouse'].forEach(id=>document.getElementById(id).addEventListener('input',renderChanges));
+boot();
+</script>
+</body>
+</html>
