@@ -1,11 +1,11 @@
--- After creating your Supabase Auth user, replace the email below and run this once.
--- This gives the account permission to run imports and the Windows Auto-Sync Agent.
+-- MaterialMind V3
+-- 建立 Auth user 後，將 Email 改成實際帳號並執行一次。
 update public.profiles p
 set role='admin', display_name='MaterialMind 管理員'
 from auth.users u
 where p.user_id=u.id and u.email='YOUR_EMAIL@example.com';
 
--- If you want a separate account for the Windows Agent, set that account to operator instead:
+-- Windows Agent 可使用 operator 帳號：
 -- update public.profiles p
 -- set role='operator', display_name='MaterialMind Windows Agent'
 -- from auth.users u

@@ -1,2 +1,2 @@
-MaterialMind V2.0.0 - Windows Folder Auto-Sync
-Build date: 2026-09-21
+MaterialMind V3.0.0
+SAP 庫存差異分析｜儲格級差異與完整消失資料
