@@ -1,2 +1,2 @@
-MaterialMind V3.0.0
-SAP 庫存差異分析｜儲格級差異與完整消失資料
+MaterialMind V4.0.0
+SAP 庫存差異分析｜儲格級差異＋逐日歷史庫存時間軸
