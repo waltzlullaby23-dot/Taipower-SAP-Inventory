@@ -273,22 +273,46 @@ function renderHistory(){
   summary.classList.toggle('hidden',!currentHistory.length);
   document.querySelectorAll('[data-history-index]').forEach(btn=>btn.addEventListener('click',()=>showMaterialTimeline(data[Number(btn.dataset.historyIndex)])));
 }
+async function fetchHistoryAll(args){
+  const pageSize=1000;
+  const all=[];
+  for(let from=0;;from+=pageSize){
+    const {data,error}=await sb.rpc('get_inventory_history',args).range(from,from+pageSize-1);
+    if(error) throw error;
+    const page=data||[];
+    all.push(...page);
+    if(page.length<pageSize) break;
+  }
+  const seen=new Set();
+  return all.filter(x=>{
+    const key=[x.snapshot_id,x.part_no,x.rating,x.warehouse,x.storage_bin,x.change_type].join('\\u0001');
+    if(seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 async function loadHistoryTimeline(){
   const start=document.getElementById('historyStart').value,end=document.getElementById('historyEnd').value;
   if(!start||!end){document.getElementById('historyStatus').textContent='請先載入快照日期。';return}
   if(start>end){document.getElementById('historyStatus').textContent='結束日不可早於基準日。';return}
   const args={p_start_date:start,p_end_date:end,p_part_no:null,p_rating:null,p_warehouse:null,p_storage_bin:null,p_only_changes:false};
-  document.getElementById('historyStatus').textContent='正在讀取逐日歷史資料…';
-  const {data,error}=await sb.rpc('get_inventory_history',args);
-  if(error){document.getElementById('historyStatus').textContent='歷史資料讀取失敗：'+error.message;currentHistory=[];renderHistory();return}
-  currentHistory=data||[];
+  document.getElementById('historyStatus').textContent='正在讀取逐日歷史資料（完整載入全部筆數）…';
+  try{
+    currentHistory=await fetchHistoryAll(args);
+  }catch(error){
+    document.getElementById('historyStatus').textContent='歷史資料讀取失敗：'+error.message;
+    currentHistory=[];renderHistory();return;
+  }
   document.getElementById('historyStatus').textContent=`已載入 ${start} ～ ${end}，共 ${currentHistory.length.toLocaleString()} 筆歷史資料；目前${document.getElementById('historyOnlyChanges').checked?'僅顯示有變化':'顯示全部'}。`;
   renderHistory();
 }
 async function showMaterialTimeline(seed){
   const start=document.getElementById('historyStart').value,end=document.getElementById('historyEnd').value;
-  const {data,error}=await sb.rpc('get_inventory_history',{p_start_date:start,p_end_date:end,p_part_no:seed.part_no,p_rating:seed.rating||'',p_warehouse:seed.warehouse||'',p_storage_bin:seed.storage_bin||'',p_only_changes:false});
-  if(error){showStatus('讀取材料時間軸失敗：'+error.message);return}
+  let data=[];
+  try{
+    data=await fetchHistoryAll({p_start_date:start,p_end_date:end,p_part_no:seed.part_no,p_rating:seed.rating||'',p_warehouse:seed.warehouse||'',p_storage_bin:seed.storage_bin||'',p_only_changes:false});
+  }catch(error){showStatus('讀取材料時間軸失敗：'+error.message);return}
   const rows=(data||[]).filter(x=>x.part_no===seed.part_no&&x.rating===seed.rating&&x.warehouse===seed.warehouse&&x.storage_bin===seed.storage_bin).sort((a,b)=>String(a.snapshot_date).localeCompare(String(b.snapshot_date)));
   document.getElementById('timelineTitle').textContent=`${seed.part_no}｜${seed.material_name||'未命名材料'}`;
   document.getElementById('timelineBody').innerHTML=`<div class="small">評價：${esc(seed.rating||'')}｜倉庫：${esc(seed.warehouse||'')}｜儲格：${esc(seed.storage_bin||'')}｜${esc(start)} ～ ${esc(end)}</div>`+rows.map(x=>`<div class="timeline-item"><b>${esc(x.snapshot_date)}｜${historyLabel(x.change_type)}</b><div style="margin-top:5px">庫存：${x.previous_quantity===null?'—':fmt(x.previous_quantity)} → <b>${fmt(x.current_quantity)}</b>${x.quantity_delta===null?'':`｜變化 ${fmt(x.quantity_delta)}`}｜安全庫存 ${fmt(x.safety_stock)}</div></div>`).join('');
