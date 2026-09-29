@@ -38,10 +38,21 @@ th{position:sticky;top:0;background:#eef3f8;z-index:1}.badge{padding:4px 8px;bor
   <div class="login-card">
     <h1>MaterialMind</h1><p class="small">SAP 材料庫存差異分析系統 V4</p>
     <div id="configNotice" class="notice hidden"></div>
-    <label>Email</label><input id="email" type="email" autocomplete="username">
-    <label>密碼</label><input id="password" type="password" autocomplete="current-password">
-    <button id="loginBtn" class="primary" style="width:100%;margin-top:8px">登入</button>
-    <button id="resetBtn" style="width:100%;margin-top:8px">寄送密碼重設信</button>
+    <div id="normalLogin">
+      <label>Email</label><input id="email" type="email" autocomplete="username">
+      <label>密碼</label><input id="password" type="password" autocomplete="current-password">
+      <button id="loginBtn" class="primary" style="width:100%;margin-top:8px">登入</button>
+      <button id="resetBtn" style="width:100%;margin-top:8px">寄送密碼重設信</button>
+    </div>
+    <div id="recoveryPanel" class="hidden">
+      <div class="notice ok" style="margin-bottom:12px">已驗證密碼重設連結，請設定新的 MaterialMind 密碼。</div>
+      <label>新密碼</label>
+      <input id="newPassword" type="password" autocomplete="new-password" placeholder="請輸入至少 8 碼的新密碼">
+      <label>確認新密碼</label>
+      <input id="confirmPassword" type="password" autocomplete="new-password" placeholder="再次輸入新密碼">
+      <button id="updatePasswordBtn" class="primary" style="width:100%;margin-top:8px">設定新密碼</button>
+      <div id="recoveryMsg" class="small" style="margin-top:10px"></div>
+    </div>
     <div id="loginMsg" class="small" style="margin-top:10px"></div>
   </div>
 </section>
@@ -224,10 +235,40 @@ async function resetPassword(){
   const {error}=await sb.auth.resetPasswordForEmail(email,{redirectTo:redirect});
   msg.textContent=error?error.message:'已寄出密碼重設信，請至信箱操作。';
 }
+function isRecoveryUrl(){
+  const hash=new URLSearchParams(location.hash.replace(/^#/,'')); 
+  const query=new URLSearchParams(location.search);
+  return hash.get('type')==='recovery' || query.get('type')==='recovery';
+}
+function showRecoveryPanel(){
+  document.getElementById('normalLogin').classList.add('hidden');
+  document.getElementById('recoveryPanel').classList.remove('hidden');
+  document.getElementById('configNotice').classList.add('hidden');
+  document.getElementById('newPassword').focus();
+}
+async function updatePassword(){
+  const p=document.getElementById('newPassword').value;
+  const cp=document.getElementById('confirmPassword').value;
+  const msg=document.getElementById('recoveryMsg');
+  if(p.length<8){msg.textContent='新密碼至少需要 8 碼。';return}
+  if(p!==cp){msg.textContent='兩次輸入的密碼不一致。';return}
+  msg.textContent='正在更新密碼…';
+  const {error}=await sb.auth.updateUser({password:p});
+  if(error){msg.textContent='更新失敗：'+error.message;return}
+  msg.textContent='密碼已成功更新，正在進入 MaterialMind…';
+  history.replaceState(null,'',location.pathname+location.search);
+  setTimeout(async()=>{await enterApp((await sb.auth.getUser()).data.user)},400);
+}
 async function boot(){
   if(!await loadConfig())return;
-  const {data:{session}}=await sb.auth.getSession();if(session)await enterApp(session.user);else showLogin();
-  sb.auth.onAuthStateChange(async(_e,s)=>{if(s)await enterApp(s.user);else showLogin()});
+  const {data:{session}}=await sb.auth.getSession();
+  if(session && isRecoveryUrl())showRecoveryPanel();
+  else if(session)await enterApp(session.user);
+  else showLogin();
+  sb.auth.onAuthStateChange(async(event,s)=>{
+    if(event==='PASSWORD_RECOVERY'){showRecoveryPanel();return}
+    if(s)await enterApp(s.user);else showLogin()
+  });
 }
 async function loadSnapshotDates(){
   const {data,error}=await sb.rpc('get_snapshot_dates');
@@ -421,7 +462,7 @@ async function exportChanges(){
   const suffix=currentDate||new Date().toISOString().slice(0,10);
   XLSX.writeFile(wb,`MaterialMind_材料異動_${suffix}.xlsx`);
 }
-document.getElementById('loginBtn').onclick=login;document.getElementById('resetBtn').onclick=resetPassword;document.getElementById('logoutBtn').onclick=()=>sb.auth.signOut();
+document.getElementById('loginBtn').onclick=login;document.getElementById('resetBtn').onclick=resetPassword;document.getElementById('updatePasswordBtn').onclick=updatePassword;document.getElementById('logoutBtn').onclick=()=>sb.auth.signOut();
 document.getElementById('refreshBtn').onclick=async()=>{await refreshDashboard();await refreshAgentStatus();await loadSnapshotDates()};
 document.getElementById('loadHistory').onclick=async()=>{await loadSnapshotDates();await loadHistory()};document.getElementById('loadTimeline').onclick=loadHistoryTimeline;document.getElementById('exportHistory').onclick=exportHistory;document.getElementById('exportBtn').onclick=exportChanges;document.getElementById('refreshAgent').onclick=refreshAgentStatus;
 document.getElementById('importBtn').onclick=()=>document.getElementById('fileInput').click();document.getElementById('fileInput').onchange=e=>{importFile(e.target.files[0]);e.target.value=''};
