@@ -38,22 +38,20 @@ th{position:sticky;top:0;background:#eef3f8;z-index:1}.badge{padding:4px 8px;bor
   <div class="login-card">
     <h1>MaterialMind</h1><p class="small">SAP 材料庫存差異分析系統 V4</p>
     <div id="configNotice" class="notice hidden"></div>
+    <label>Email</label><input id="email" type="email" autocomplete="username">
+    <label>密碼</label><input id="password" type="password" autocomplete="current-password">
     <div id="normalLogin">
-      <label>Email</label><input id="email" type="email" autocomplete="username">
-      <label>密碼</label><input id="password" type="password" autocomplete="current-password">
       <button id="loginBtn" class="primary" style="width:100%;margin-top:8px">登入</button>
       <button id="resetBtn" style="width:100%;margin-top:8px">寄送密碼重設信</button>
+      <div id="loginMsg" class="small" style="margin-top:10px"></div>
     </div>
     <div id="recoveryPanel" class="hidden">
-      <div class="notice ok" style="margin-bottom:12px">已驗證密碼重設連結，請設定新的 MaterialMind 密碼。</div>
-      <label>新密碼</label>
-      <input id="newPassword" type="password" autocomplete="new-password" placeholder="請輸入至少 8 碼的新密碼">
-      <label>確認新密碼</label>
-      <input id="confirmPassword" type="password" autocomplete="new-password" placeholder="再次輸入新密碼">
+      <div class="notice">已進入密碼恢復模式，請設定新的登入密碼。</div>
+      <label>新密碼</label><input id="newPassword" type="password" autocomplete="new-password" placeholder="請輸入至少 8 碼的新密碼">
+      <label>確認新密碼</label><input id="confirmPassword" type="password" autocomplete="new-password" placeholder="再次輸入新密碼">
       <button id="updatePasswordBtn" class="primary" style="width:100%;margin-top:8px">設定新密碼</button>
       <div id="recoveryMsg" class="small" style="margin-top:10px"></div>
     </div>
-    <div id="loginMsg" class="small" style="margin-top:10px"></div>
   </div>
 </section>
 
@@ -236,7 +234,7 @@ async function resetPassword(){
   msg.textContent=error?error.message:'已寄出密碼重設信，請至信箱操作。';
 }
 function isRecoveryUrl(){
-  const hash=new URLSearchParams(location.hash.replace(/^#/,'')); 
+  const hash=new URLSearchParams(location.hash.replace(/^#/,''));
   const query=new URLSearchParams(location.search);
   return hash.get('type')==='recovery' || query.get('type')==='recovery';
 }
@@ -244,6 +242,7 @@ function showRecoveryPanel(){
   document.getElementById('normalLogin').classList.add('hidden');
   document.getElementById('recoveryPanel').classList.remove('hidden');
   document.getElementById('configNotice').classList.add('hidden');
+  document.getElementById('recoveryMsg').textContent='';
   document.getElementById('newPassword').focus();
 }
 async function updatePassword(){
@@ -257,17 +256,32 @@ async function updatePassword(){
   if(error){msg.textContent='更新失敗：'+error.message;return}
   msg.textContent='密碼已成功更新，正在進入 MaterialMind…';
   history.replaceState(null,'',location.pathname+location.search);
-  setTimeout(async()=>{await enterApp((await sb.auth.getUser()).data.user)},400);
+  setTimeout(async()=>{
+    const {data}=await sb.auth.getUser();
+    if(data.user)await enterApp(data.user);
+  },400);
 }
 async function boot(){
   if(!await loadConfig())return;
+  // IMPORTANT: capture recovery state BEFORE getSession(). Supabase may consume the
+  // recovery hash and emit the auth event before a listener is attached.
+  const recoveryRequested=isRecoveryUrl();
   const {data:{session}}=await sb.auth.getSession();
-  if(session && isRecoveryUrl())showRecoveryPanel();
-  else if(session)await enterApp(session.user);
-  else showLogin();
+  if(recoveryRequested){
+    if(session)showRecoveryPanel();
+    else showLogin();
+  }else if(session){
+    await enterApp(session.user);
+  }else{
+    showLogin();
+  }
   sb.auth.onAuthStateChange(async(event,s)=>{
-    if(event==='PASSWORD_RECOVERY'){showRecoveryPanel();return}
-    if(s)await enterApp(s.user);else showLogin()
+    if(event==='PASSWORD_RECOVERY' || recoveryRequested){
+      if(s)showRecoveryPanel();
+      else showLogin();
+      return;
+    }
+    if(s)await enterApp(s.user);else showLogin();
   });
 }
 async function loadSnapshotDates(){
@@ -419,48 +433,10 @@ async function loadHistory(){
   if(error){showStatus(error.message);return}
   document.getElementById('history').innerHTML=(data||[]).map(x=>`<tr><td>${esc(x.snapshot_date)}</td><td>${esc(x.source_file_name)}</td><td>${fmt(x.row_count)}</td><td>${new Date(x.imported_at).toLocaleString('zh-TW')}</td><td>${esc(x.imported_by)}</td></tr>`).join('')||'<tr><td colspan="5">尚無快照</td></tr>';
 }
-async function exportChanges(){
-  const data=filteredChanges();
-  if(!data.length){showStatus('目前篩選條件沒有可匯出的異動資料。');return}
-
-  // 取得本次比較的實際兩個快照日期，避免 Excel 只顯示「昨日／今日」而無法判斷比較區間。
-  let previousDate='', currentDate='';
-  try{
-    const {data:snapshots,error}=await sb.from('inventory_snapshots')
-      .select('snapshot_date')
-      .order('snapshot_date',{ascending:false})
-      .limit(2);
-    if(error)throw error;
-    const dates=(snapshots||[]).map(x=>String(x.snapshot_date)).filter(Boolean);
-    currentDate=dates[0]||'';
-    previousDate=dates[1]||'';
-  }catch(e){
-    // 若日期查詢失敗，仍允許匯出，不中斷使用者工作。
-    showStatus('已匯出，但無法取得比較日期：'+(e.message||e));
-  }
-
-  const previousHeader=previousDate?`昨日庫存 (${previousDate})`:'昨日庫存';
-  const currentHeader=currentDate?`今日庫存 (${currentDate})`:'今日庫存';
-  const compareDate=previousDate&&currentDate?`${previousDate} → ${currentDate}`:(currentDate||previousDate||'');
-
-  const out=data.map(x=>({
-    比較日期:compareDate,
-    狀態:{increase:'增加',decrease:'減少',new:'新增',disappeared:'消失'}[x.change_type]||x.change_type,
-    物料編號:x.part_no,
-    材料名稱:x.material_name,
-    評價:x.rating,
-    儲存地點:x.warehouse,
-    儲格:x.storage_bin||'',
-    [previousHeader]:x.previous_quantity,
-    [currentHeader]:x.current_quantity,
-    差異:x.quantity_delta,
-    安全庫存:x.safety_stock
-  }));
-
-  const ws=XLSX.utils.json_to_sheet(out),wb=XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb,ws,'材料異動');
-  const suffix=currentDate||new Date().toISOString().slice(0,10);
-  XLSX.writeFile(wb,`MaterialMind_材料異動_${suffix}.xlsx`);
+function exportChanges(){
+  const data=filteredChanges();if(!data.length){showStatus('目前篩選條件沒有可匯出的異動資料。');return}
+  const out=data.map(x=>({狀態:{increase:'增加',decrease:'減少',new:'新增',disappeared:'消失'}[x.change_type]||x.change_type,物料編號:x.part_no,材料名稱:x.material_name,評價:x.rating,儲存地點:x.warehouse,儲格:x.storage_bin||'',昨日庫存:x.previous_quantity,今日庫存:x.current_quantity,差異:x.quantity_delta,安全庫存:x.safety_stock}));
+  const ws=XLSX.utils.json_to_sheet(out),wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'材料異動');XLSX.writeFile(wb,`MaterialMind_材料異動_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 document.getElementById('loginBtn').onclick=login;document.getElementById('resetBtn').onclick=resetPassword;document.getElementById('updatePasswordBtn').onclick=updatePassword;document.getElementById('logoutBtn').onclick=()=>sb.auth.signOut();
 document.getElementById('refreshBtn').onclick=async()=>{await refreshDashboard();await refreshAgentStatus();await loadSnapshotDates()};
