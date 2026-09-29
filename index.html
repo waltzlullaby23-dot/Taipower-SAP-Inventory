@@ -263,26 +263,47 @@ async function updatePassword(){
 }
 async function boot(){
   if(!await loadConfig())return;
-  // IMPORTANT: capture recovery state BEFORE getSession(). Supabase may consume the
-  // recovery hash and emit the auth event before a listener is attached.
-  const recoveryRequested=isRecoveryUrl();
-  const {data:{session}}=await sb.auth.getSession();
-  if(recoveryRequested){
-    if(session)showRecoveryPanel();
-    else showLogin();
-  }else if(session){
-    await enterApp(session.user);
-  }else{
-    showLogin();
-  }
-  sb.auth.onAuthStateChange(async(event,s)=>{
-    if(event==='PASSWORD_RECOVERY' || recoveryRequested){
-      if(s)showRecoveryPanel();
-      else showLogin();
+
+  // Register the listener BEFORE getSession(). Supabase can emit PASSWORD_RECOVERY
+  // while processing the recovery URL; registering afterwards can miss the event.
+  let recoveryMode=isRecoveryUrl();
+  let recoveryEventSeen=false;
+  let recoverySession=null;
+  let handlingRecovery=false;
+
+  sb.auth.onAuthStateChange((event,s)=>{
+    if(event==='PASSWORD_RECOVERY'){
+      recoveryMode=true;
+      recoveryEventSeen=true;
+      recoverySession=s||null;
+      showRecoveryPanel();
       return;
     }
-    if(s)await enterApp(s.user);else showLogin();
+    if(recoveryMode){
+      // During recovery, do not let SIGNED_IN / INITIAL_SESSION send the user
+      // into the application before a new password has been chosen.
+      recoverySession=s||recoverySession;
+      if(handlingRecovery) return;
+      return;
+    }
+    if(s) enterApp(s.user); else showLogin();
   });
+
+  const {data:{session}}=await sb.auth.getSession();
+
+  // Give the Auth event loop a chance to deliver PASSWORD_RECOVERY. This is
+  // intentionally done after the listener is attached.
+  await new Promise(resolve=>setTimeout(resolve,150));
+
+  if(recoveryMode || recoveryEventSeen){
+    handlingRecovery=true;
+    if(recoveryEventSeen || session || recoverySession) showRecoveryPanel();
+    else showLogin();
+    return;
+  }
+
+  if(session) await enterApp(session.user);
+  else showLogin();
 }
 async function loadSnapshotDates(){
   const {data,error}=await sb.rpc('get_snapshot_dates');
