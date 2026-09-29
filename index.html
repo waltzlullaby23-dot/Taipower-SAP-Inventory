@@ -132,7 +132,7 @@ th{position:sticky;top:0;background:#eef3f8;z-index:1}.badge{padding:4px 8px;bor
 <div id="modal" class="modal hidden"><div class="modalbox"><h3>匯入結果</h3><div id="modalBody"></div><button id="closeModal" style="margin-top:14px">關閉</button></div></div>
 <div id="timelineModal" class="modal hidden"><div class="modalbox"><div class="timeline-title"><h3 id="timelineTitle">材料歷史時間軸</h3><button id="closeTimeline">關閉</button></div><div id="timelineBody" class="timeline-list" style="margin-top:12px"></div></div></div>
 
-<script src="config.js?v=4"></script>
+<script src="config.js"></script>
 <script>
 const cfg=window.MATERIALMIND_CONFIG||{};
 let sb=null,currentUser=null,currentChanges=[],currentRole='viewer',snapshotDates=[],currentHistory=[];
@@ -247,7 +247,18 @@ function filteredHistory(){
   const rating=document.getElementById('historyRating').value.trim().toLowerCase();
   const wh=document.getElementById('historyWarehouse').value.trim().toLowerCase();
   const bin=document.getElementById('historyBin').value.trim().toLowerCase();
-  return currentHistory.filter(x=>(!q||String(x.part_no||'').toLowerCase().includes(q)||String(x.material_name||'').toLowerCase().includes(q))&&(!rating||String(x.rating||'').toLowerCase().includes(rating))&&(!wh||String(x.warehouse||'').toLowerCase().includes(wh))&&(!bin||String(x.storage_bin||'').toLowerCase().includes(bin)));
+  const onlyChanges=document.getElementById('historyOnlyChanges').checked;
+  return currentHistory
+    .filter(x=>(!q||String(x.part_no||'').toLowerCase().includes(q)||String(x.material_name||'').toLowerCase().includes(q))&&(!rating||String(x.rating||'').toLowerCase().includes(rating))&&(!wh||String(x.warehouse||'').toLowerCase().includes(wh))&&(!bin||String(x.storage_bin||'').toLowerCase().includes(bin)))
+    .filter(x=>!onlyChanges || (x.change_type!=='baseline' && x.change_type!=='unchanged' && Number(x.quantity_delta||0)!==0))
+    .sort((a,b)=>{
+      const d=String(b.snapshot_date).localeCompare(String(a.snapshot_date));
+      if(d!==0)return d;
+      const priority={increase:0,decrease:0,new:0,disappeared:0,baseline:1,unchanged:2};
+      const pa=priority[a.change_type]??9,pb=priority[b.change_type]??9;
+      if(pa!==pb)return pa-pb;
+      return `${a.part_no}|${a.rating}|${a.warehouse}|${a.storage_bin}`.localeCompare(`${b.part_no}|${b.rating}|${b.warehouse}|${b.storage_bin}`);
+    });
 }
 function renderHistory(){
   const data=filteredHistory();
@@ -266,13 +277,12 @@ async function loadHistoryTimeline(){
   const start=document.getElementById('historyStart').value,end=document.getElementById('historyEnd').value;
   if(!start||!end){document.getElementById('historyStatus').textContent='請先載入快照日期。';return}
   if(start>end){document.getElementById('historyStatus').textContent='結束日不可早於基準日。';return}
-  const only=document.getElementById('historyOnlyChanges').checked;
-  const args={p_start_date:start,p_end_date:end,p_part_no:null,p_rating:null,p_warehouse:null,p_storage_bin:null,p_only_changes:only};
+  const args={p_start_date:start,p_end_date:end,p_part_no:null,p_rating:null,p_warehouse:null,p_storage_bin:null,p_only_changes:false};
   document.getElementById('historyStatus').textContent='正在讀取逐日歷史資料…';
   const {data,error}=await sb.rpc('get_inventory_history',args);
   if(error){document.getElementById('historyStatus').textContent='歷史資料讀取失敗：'+error.message;currentHistory=[];renderHistory();return}
   currentHistory=data||[];
-  document.getElementById('historyStatus').textContent=`已載入 ${start} ～ ${end}，共 ${currentHistory.length.toLocaleString()} 筆。`;
+  document.getElementById('historyStatus').textContent=`已載入 ${start} ～ ${end}，共 ${currentHistory.length.toLocaleString()} 筆歷史資料；目前${document.getElementById('historyOnlyChanges').checked?'僅顯示有變化':'顯示全部'}。`;
   renderHistory();
 }
 async function showMaterialTimeline(seed){
@@ -354,7 +364,12 @@ document.getElementById('refreshBtn').onclick=async()=>{await refreshDashboard()
 document.getElementById('loadHistory').onclick=async()=>{await loadSnapshotDates();await loadHistory()};document.getElementById('loadTimeline').onclick=loadHistoryTimeline;document.getElementById('exportHistory').onclick=exportHistory;document.getElementById('exportBtn').onclick=exportChanges;document.getElementById('refreshAgent').onclick=refreshAgentStatus;
 document.getElementById('importBtn').onclick=()=>document.getElementById('fileInput').click();document.getElementById('fileInput').onchange=e=>{importFile(e.target.files[0]);e.target.value=''};
 document.getElementById('closeModal').onclick=()=>document.getElementById('modal').classList.add('hidden');document.getElementById('closeTimeline').onclick=()=>document.getElementById('timelineModal').classList.add('hidden');document.getElementById('timelineModal').addEventListener('click',e=>{if(e.target.id==='timelineModal')e.currentTarget.classList.add('hidden')});
-['search','type','rating','warehouse','storageBin','sortBy'].forEach(id=>document.getElementById(id).addEventListener('input',renderChanges));['historySearch','historyRating','historyWarehouse','historyBin'].forEach(id=>document.getElementById(id).addEventListener('input',renderHistory));document.getElementById('historyOnlyChanges').addEventListener('change',loadHistoryTimeline);
+['search','type','rating','warehouse','storageBin','sortBy'].forEach(id=>document.getElementById(id).addEventListener('input',renderChanges));['historySearch','historyRating','historyWarehouse','historyBin'].forEach(id=>document.getElementById(id).addEventListener('input',renderHistory));document.getElementById('historyOnlyChanges').addEventListener('change',()=>{
+  if(!currentHistory.length){loadHistoryTimeline();return}
+  const start=document.getElementById('historyStart').value,end=document.getElementById('historyEnd').value;
+  document.getElementById('historyStatus').textContent=`已載入 ${start} ～ ${end}，共 ${currentHistory.length.toLocaleString()} 筆歷史資料；目前${document.getElementById('historyOnlyChanges').checked?'僅顯示有變化':'顯示全部'}。`;
+  renderHistory();
+});
 document.getElementById('type').addEventListener('change',renderChanges);document.getElementById('sortBy').addEventListener('change',renderChanges);
 setInterval(async()=>{if(currentUser){await refreshDashboard();await refreshAgentStatus()}},60000);
 boot();
