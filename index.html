@@ -378,10 +378,48 @@ async function loadHistory(){
   if(error){showStatus(error.message);return}
   document.getElementById('history').innerHTML=(data||[]).map(x=>`<tr><td>${esc(x.snapshot_date)}</td><td>${esc(x.source_file_name)}</td><td>${fmt(x.row_count)}</td><td>${new Date(x.imported_at).toLocaleString('zh-TW')}</td><td>${esc(x.imported_by)}</td></tr>`).join('')||'<tr><td colspan="5">尚無快照</td></tr>';
 }
-function exportChanges(){
-  const data=filteredChanges();if(!data.length){showStatus('目前篩選條件沒有可匯出的異動資料。');return}
-  const out=data.map(x=>({狀態:{increase:'增加',decrease:'減少',new:'新增',disappeared:'消失'}[x.change_type]||x.change_type,物料編號:x.part_no,材料名稱:x.material_name,評價:x.rating,儲存地點:x.warehouse,儲格:x.storage_bin||'',昨日庫存:x.previous_quantity,今日庫存:x.current_quantity,差異:x.quantity_delta,安全庫存:x.safety_stock}));
-  const ws=XLSX.utils.json_to_sheet(out),wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'材料異動');XLSX.writeFile(wb,`MaterialMind_材料異動_${new Date().toISOString().slice(0,10)}.xlsx`);
+async function exportChanges(){
+  const data=filteredChanges();
+  if(!data.length){showStatus('目前篩選條件沒有可匯出的異動資料。');return}
+
+  // 取得本次比較的實際兩個快照日期，避免 Excel 只顯示「昨日／今日」而無法判斷比較區間。
+  let previousDate='', currentDate='';
+  try{
+    const {data:snapshots,error}=await sb.from('inventory_snapshots')
+      .select('snapshot_date')
+      .order('snapshot_date',{ascending:false})
+      .limit(2);
+    if(error)throw error;
+    const dates=(snapshots||[]).map(x=>String(x.snapshot_date)).filter(Boolean);
+    currentDate=dates[0]||'';
+    previousDate=dates[1]||'';
+  }catch(e){
+    // 若日期查詢失敗，仍允許匯出，不中斷使用者工作。
+    showStatus('已匯出，但無法取得比較日期：'+(e.message||e));
+  }
+
+  const previousHeader=previousDate?`昨日庫存 (${previousDate})`:'昨日庫存';
+  const currentHeader=currentDate?`今日庫存 (${currentDate})`:'今日庫存';
+  const compareDate=previousDate&&currentDate?`${previousDate} → ${currentDate}`:(currentDate||previousDate||'');
+
+  const out=data.map(x=>({
+    比較日期:compareDate,
+    狀態:{increase:'增加',decrease:'減少',new:'新增',disappeared:'消失'}[x.change_type]||x.change_type,
+    物料編號:x.part_no,
+    材料名稱:x.material_name,
+    評價:x.rating,
+    儲存地點:x.warehouse,
+    儲格:x.storage_bin||'',
+    [previousHeader]:x.previous_quantity,
+    [currentHeader]:x.current_quantity,
+    差異:x.quantity_delta,
+    安全庫存:x.safety_stock
+  }));
+
+  const ws=XLSX.utils.json_to_sheet(out),wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,'材料異動');
+  const suffix=currentDate||new Date().toISOString().slice(0,10);
+  XLSX.writeFile(wb,`MaterialMind_材料異動_${suffix}.xlsx`);
 }
 document.getElementById('loginBtn').onclick=login;document.getElementById('resetBtn').onclick=resetPassword;document.getElementById('logoutBtn').onclick=()=>sb.auth.signOut();
 document.getElementById('refreshBtn').onclick=async()=>{await refreshDashboard();await refreshAgentStatus();await loadSnapshotDates()};
