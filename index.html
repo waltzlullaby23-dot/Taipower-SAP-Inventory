@@ -145,6 +145,8 @@ th{position:sticky;top:0;background:#eef3f8;z-index:1}.badge{padding:4px 8px;bor
 <script>
 const cfg=window.MATERIALMIND_CONFIG||{};
 let sb=null,currentUser=null,currentChanges=[],currentRole='viewer',snapshotDates=[],currentHistory=[];
+let recoveryModeActive=false;
+let recoveryIntentFromUrl=false;
 
 function showStatus(msg,ok=false){const el=document.getElementById('status');el.textContent=msg;el.className='notice '+(ok?'ok':'');el.classList.remove('hidden')}
 function clearStatus(){document.getElementById('status').classList.add('hidden')}
@@ -215,7 +217,10 @@ function parseWorkbook(file){
 async function loadConfig(){
   if(!cfg.SUPABASE_URL||cfg.SUPABASE_URL.includes('YOUR_PROJECT')||!cfg.SUPABASE_PUBLISHABLE_KEY||cfg.SUPABASE_PUBLISHABLE_KEY.includes('YOUR_')){
     const n=document.getElementById('configNotice');n.textContent='尚未設定 Supabase Project URL / Publishable Key。';n.classList.remove('hidden');return false}
-  sb=supabase.createClient(cfg.SUPABASE_URL,cfg.SUPABASE_PUBLISHABLE_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});return true
+  // Disable Supabase's automatic initialization so the recovery listener can be
+  // attached BEFORE Auth processes the password-reset callback URL.
+  sb=supabase.createClient(cfg.SUPABASE_URL,cfg.SUPABASE_PUBLISHABLE_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true,skipAutoInitialize:true}});
+  return true
 }
 function showLogin(){document.getElementById('login').classList.remove('hidden');document.getElementById('app').classList.add('hidden')}
 async function enterApp(user){
@@ -229,21 +234,32 @@ async function login(){const email=document.getElementById('email').value.trim()
 async function resetPassword(){
   const email=document.getElementById('email').value.trim(),msg=document.getElementById('loginMsg');
   if(!email){msg.textContent='請先輸入 Email。';return}
-  const redirect=`${location.origin}${location.pathname}`;
-  const {error}=await sb.auth.resetPasswordForEmail(email,{redirectTo:redirect});
+  // Add an app-owned recovery marker to the redirect URL. This survives the
+  // Supabase callback handling and lets the app distinguish recovery from a
+  // normal persisted login session. The URL must be allowed in Supabase Auth.
+  const redirectUrl=new URL(`${location.origin}${location.pathname}`);
+  redirectUrl.searchParams.set('mm_recovery','1');
+  const {error}=await sb.auth.resetPasswordForEmail(email,{redirectTo:redirectUrl.toString()});
   msg.textContent=error?error.message:'已寄出密碼重設信，請至信箱操作。';
 }
 function isRecoveryUrl(){
-  const hash=new URLSearchParams(location.hash.replace(/^#/,''));
+  const hash=new URLSearchParams(location.hash.replace(/^#/,'').replace(/^\?/ ,''));
   const query=new URLSearchParams(location.search);
-  return hash.get('type')==='recovery' || query.get('type')==='recovery';
+  // mm_recovery is our own marker so the app knows this redirect came from
+  // the password-reset button even if Supabase consumes the auth fragment.
+  return query.get('mm_recovery')==='1' ||
+         hash.get('type')==='recovery' ||
+         query.get('type')==='recovery' ||
+         query.get('code')!==null ||
+         (hash.get('type')==='recovery' && hash.has('access_token'));
 }
 function showRecoveryPanel(){
+  recoveryModeActive=true;
   document.getElementById('normalLogin').classList.add('hidden');
   document.getElementById('recoveryPanel').classList.remove('hidden');
   document.getElementById('configNotice').classList.add('hidden');
   document.getElementById('recoveryMsg').textContent='';
-  document.getElementById('newPassword').focus();
+  setTimeout(()=>document.getElementById('newPassword').focus(),0);
 }
 async function updatePassword(){
   const p=document.getElementById('newPassword').value;
@@ -254,56 +270,71 @@ async function updatePassword(){
   msg.textContent='正在更新密碼…';
   const {error}=await sb.auth.updateUser({password:p});
   if(error){msg.textContent='更新失敗：'+error.message;return}
+  recoveryModeActive=false;
   msg.textContent='密碼已成功更新，正在進入 MaterialMind…';
-  history.replaceState(null,'',location.pathname+location.search);
+  const u=new URL(location.href);
+  u.searchParams.delete('mm_recovery');
+  u.searchParams.delete('code');
+  u.searchParams.delete('type');
+  u.hash='';
+  history.replaceState(null,'',u.pathname+(u.search?u.search:'') );
   setTimeout(async()=>{
     const {data}=await sb.auth.getUser();
     if(data.user)await enterApp(data.user);
   },400);
 }
 async function boot(){
+  // Capture recovery intent BEFORE createClient(). Supabase can process the
+  // callback URL during client initialization, so the URL must be inspected first.
+  recoveryIntentFromUrl=isRecoveryUrl();
+  recoveryModeActive=recoveryIntentFromUrl;
   if(!await loadConfig())return;
 
-  // Register the listener BEFORE getSession(). Supabase can emit PASSWORD_RECOVERY
-  // while processing the recovery URL; registering afterwards can miss the event.
-  let recoveryMode=isRecoveryUrl();
   let recoveryEventSeen=false;
   let recoverySession=null;
-  let handlingRecovery=false;
+  let bootFinished=false;
 
+  // Supabase explicitly documents PASSWORD_RECOVERY as the event to use for
+  // showing a password-update UI. The listener is attached before initialize().
   sb.auth.onAuthStateChange((event,s)=>{
     if(event==='PASSWORD_RECOVERY'){
-      recoveryMode=true;
+      recoveryModeActive=true;
       recoveryEventSeen=true;
       recoverySession=s||null;
       showRecoveryPanel();
       return;
     }
-    if(recoveryMode){
-      // During recovery, do not let SIGNED_IN / INITIAL_SESSION send the user
-      // into the application before a new password has been chosen.
+    if(recoveryModeActive || recoveryIntentFromUrl){
       recoverySession=s||recoverySession;
-      if(handlingRecovery) return;
+      // Never let INITIAL_SESSION / SIGNED_IN enter the app while a recovery
+      // flow is active. updatePassword() clears recoveryModeActive explicitly.
       return;
     }
-    if(s) enterApp(s.user); else showLogin();
+    if(!bootFinished)return;
+    if(s)void enterApp(s.user);else showLogin();
   });
 
+  const init=await sb.auth.initialize();
+  if(init?.error){
+    document.getElementById('loginMsg').textContent='驗證連結處理失敗：'+init.error.message;
+  }
   const {data:{session}}=await sb.auth.getSession();
 
-  // Give the Auth event loop a chance to deliver PASSWORD_RECOVERY. This is
-  // intentionally done after the listener is attached.
-  await new Promise(resolve=>setTimeout(resolve,150));
-
-  if(recoveryMode || recoveryEventSeen){
-    handlingRecovery=true;
-    if(recoveryEventSeen || session || recoverySession) showRecoveryPanel();
-    else showLogin();
+  if(recoveryModeActive || recoveryIntentFromUrl || recoveryEventSeen){
+    recoveryModeActive=true;
+    if(session || recoverySession || recoveryEventSeen){
+      showRecoveryPanel();
+    }else{
+      showLogin();
+      document.getElementById('loginMsg').textContent='密碼重設連結無效或已過期，請重新寄送重設信。';
+    }
+    bootFinished=true;
     return;
   }
 
   if(session) await enterApp(session.user);
   else showLogin();
+  bootFinished=true;
 }
 async function loadSnapshotDates(){
   const {data,error}=await sb.rpc('get_snapshot_dates');
@@ -454,10 +485,48 @@ async function loadHistory(){
   if(error){showStatus(error.message);return}
   document.getElementById('history').innerHTML=(data||[]).map(x=>`<tr><td>${esc(x.snapshot_date)}</td><td>${esc(x.source_file_name)}</td><td>${fmt(x.row_count)}</td><td>${new Date(x.imported_at).toLocaleString('zh-TW')}</td><td>${esc(x.imported_by)}</td></tr>`).join('')||'<tr><td colspan="5">尚無快照</td></tr>';
 }
-function exportChanges(){
-  const data=filteredChanges();if(!data.length){showStatus('目前篩選條件沒有可匯出的異動資料。');return}
-  const out=data.map(x=>({狀態:{increase:'增加',decrease:'減少',new:'新增',disappeared:'消失'}[x.change_type]||x.change_type,物料編號:x.part_no,材料名稱:x.material_name,評價:x.rating,儲存地點:x.warehouse,儲格:x.storage_bin||'',昨日庫存:x.previous_quantity,今日庫存:x.current_quantity,差異:x.quantity_delta,安全庫存:x.safety_stock}));
-  const ws=XLSX.utils.json_to_sheet(out),wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'材料異動');XLSX.writeFile(wb,`MaterialMind_材料異動_${new Date().toISOString().slice(0,10)}.xlsx`);
+async function exportChanges(){
+  const data=filteredChanges();
+  if(!data.length){showStatus('目前篩選條件沒有可匯出的異動資料。');return}
+
+  // 取得本次比較的實際兩個快照日期，避免 Excel 只顯示「昨日／今日」而無法判斷比較區間。
+  let previousDate='', currentDate='';
+  try{
+    const {data:snapshots,error}=await sb.from('inventory_snapshots')
+      .select('snapshot_date')
+      .order('snapshot_date',{ascending:false})
+      .limit(2);
+    if(error)throw error;
+    const dates=(snapshots||[]).map(x=>String(x.snapshot_date)).filter(Boolean);
+    currentDate=dates[0]||'';
+    previousDate=dates[1]||'';
+  }catch(e){
+    // 若日期查詢失敗，仍允許匯出，不中斷使用者工作。
+    showStatus('已匯出，但無法取得比較日期：'+(e.message||e));
+  }
+
+  const previousHeader=previousDate?`昨日庫存 (${previousDate})`:'昨日庫存';
+  const currentHeader=currentDate?`今日庫存 (${currentDate})`:'今日庫存';
+  const compareDate=previousDate&&currentDate?`${previousDate} → ${currentDate}`:(currentDate||previousDate||'');
+
+  const out=data.map(x=>({
+    比較日期:compareDate,
+    狀態:{increase:'增加',decrease:'減少',new:'新增',disappeared:'消失'}[x.change_type]||x.change_type,
+    物料編號:x.part_no,
+    材料名稱:x.material_name,
+    評價:x.rating,
+    儲存地點:x.warehouse,
+    儲格:x.storage_bin||'',
+    [previousHeader]:x.previous_quantity,
+    [currentHeader]:x.current_quantity,
+    差異:x.quantity_delta,
+    安全庫存:x.safety_stock
+  }));
+
+  const ws=XLSX.utils.json_to_sheet(out),wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,'材料異動');
+  const suffix=currentDate||new Date().toISOString().slice(0,10);
+  XLSX.writeFile(wb,`MaterialMind_材料異動_${suffix}.xlsx`);
 }
 document.getElementById('loginBtn').onclick=login;document.getElementById('resetBtn').onclick=resetPassword;document.getElementById('updatePasswordBtn').onclick=updatePassword;document.getElementById('logoutBtn').onclick=()=>sb.auth.signOut();
 document.getElementById('refreshBtn').onclick=async()=>{await refreshDashboard();await refreshAgentStatus();await loadSnapshotDates()};
