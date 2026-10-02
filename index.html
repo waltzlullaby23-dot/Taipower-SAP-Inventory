@@ -80,15 +80,15 @@ th{position:sticky;top:0;background:#eef3f8;z-index:1}.badge{padding:4px 8px;bor
 
   <section class="panel" id="changesPanel">
     <div class="panel-head">
-      <div><b>有變動的材料</b><div class="small" id="compareText">尚無兩份快照</div></div>
+      <div><b>有變動的材料｜分倉比對</b><div class="small" id="compareText">尚無兩份快照</div></div>
       <div class="filters">
         <input id="search" placeholder="搜尋料號／材料名稱">
         <select id="type"><option value="">全部狀態</option><option value="increase">增加</option><option value="decrease">減少</option><option value="new">新增</option><option value="disappeared">消失</option></select>
         <input id="rating" placeholder="評價">
-        <input id="warehouse" placeholder="倉庫／儲存地點">
+        <select id="warehouse" title="分倉比對"><option value="">全部倉庫</option></select>
         <input id="storageBin" placeholder="儲格">
         <select id="sortBy" title="排列方式">
-          <option value="storage_bin">依儲格→料號</option><option value="part_no">依料號→儲格</option>
+          <option value="storage_bin">依儲格→料號</option><option value="part_no">依料號→儲格</option><option value="warehouse">依倉庫→儲格→料號</option>
           <option value="delta_desc">依差異量由大到小</option><option value="delta_asc">依差異量由小到大</option>
         </select>
       </div>
@@ -111,7 +111,7 @@ th{position:sticky;top:0;background:#eef3f8;z-index:1}.badge{padding:4px 8px;bor
         <label>結束日<select id="historyEnd"><option value="">請先載入日期</option></select></label>
         <label>搜尋料號／名稱<input id="historySearch" placeholder="例如 1102050209"></label>
         <label>評價<input id="historyRating" placeholder="評價"></label>
-        <label>倉庫<input id="historyWarehouse" placeholder="21m6"></label>
+        <label>倉庫<select id="historyWarehouse" title="歷史倉庫"><option value="">全部倉庫</option></select></label>
         <label>儲格<input id="historyBin" placeholder="A-01"></label>
         <label style="flex-direction:row;align-items:center;margin-top:22px"><input id="historyOnlyChanges" type="checkbox"> 只顯示有變化</label>
       </div>
@@ -349,6 +349,35 @@ async function loadSnapshotDates(){
 }
 function historyLabel(type){return {baseline:'基準日',increase:'增加',decrease:'減少',new:'新增',disappeared:'消失',unchanged:'未變化'}[type]||type}
 function historyBadgeClass(type){return type==='baseline'?'baseline-badge':type}
+function uniqueWarehouses(rows){
+  return [...new Set((rows||[]).map(x=>String(x.warehouse||'').trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true,sensitivity:'base'}));
+}
+function populateWarehouseSelect(id, rows){
+  const el=document.getElementById(id);
+  if(!el)return;
+  const previous=el.value;
+  const values=uniqueWarehouses(rows);
+  el.innerHTML='<option value="">全部倉庫</option>'+values.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join('');
+  if(values.includes(previous))el.value=previous;
+}
+function warehouseScopedChanges(){
+  const wh=document.getElementById('warehouse').value.trim().toLowerCase();
+  return wh?currentChanges.filter(x=>String(x.warehouse||'').trim().toLowerCase()===wh):currentChanges;
+}
+function renderWarehouseSummary(){
+  const rows=warehouseScopedChanges();
+  const counts={increase:0,decrease:0,new:0,disappeared:0};
+  rows.forEach(x=>{if(counts[x.change_type]!==undefined)counts[x.change_type]++;});
+  const total=counts.increase+counts.decrease+counts.new+counts.disappeared;
+  document.getElementById('totalChanges').textContent=total.toLocaleString();
+  document.getElementById('increaseCount').textContent=counts.increase.toLocaleString();
+  document.getElementById('decreaseCount').textContent=counts.decrease.toLocaleString();
+  document.getElementById('newCount').textContent=counts.new.toLocaleString();
+  document.getElementById('disappearedCount').textContent=counts.disappeared.toLocaleString();
+  const latest=document.getElementById('latestDate').textContent;
+  const wh=document.getElementById('warehouse').value;
+  document.getElementById('compareText').textContent=latest&&latest!=='—'?`${latest} 與前一份快照比較｜${wh?'目前倉庫：'+wh:'目前：全部倉庫'}`:'尚無兩份快照';
+}
 function filteredHistory(){
   const q=document.getElementById('historySearch').value.trim().toLowerCase();
   const rating=document.getElementById('historyRating').value.trim().toLowerCase();
@@ -407,6 +436,7 @@ async function loadHistoryTimeline(){
   document.getElementById('historyStatus').textContent='正在讀取逐日歷史資料（完整載入全部筆數）…';
   try{
     currentHistory=await fetchHistoryAll(args);
+    populateWarehouseSelect('historyWarehouse',currentHistory);
   }catch(error){
     document.getElementById('historyStatus').textContent='歷史資料讀取失敗：'+error.message;
     currentHistory=[];renderHistory();return;
@@ -431,11 +461,16 @@ function exportHistory(){
   const ws=XLSX.utils.json_to_sheet(out),wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'歷史時間軸');XLSX.writeFile(wb,`MaterialMind_歷史庫存時間軸_${document.getElementById('historyStart').value}_${document.getElementById('historyEnd').value}.xlsx`);
 }
 async function refreshDashboard(){
-  clearStatus();const {data,error}=await sb.rpc('get_dashboard');if(error){showStatus('讀取資料失敗：'+error.message);return}
-  const latest=data?.latest,c=data?.counts||{};document.getElementById('latestDate').textContent=latest?.snapshot_date||'—';document.getElementById('latestFile').textContent=latest?.source_file_name||'';
-  const total=Number(c.increase_count||0)+Number(c.decrease_count||0)+Number(c.new_count||0)+Number(c.disappeared_count||0);
-  document.getElementById('totalChanges').textContent=total;document.getElementById('increaseCount').textContent=c.increase_count||0;document.getElementById('decreaseCount').textContent=c.decrease_count||0;document.getElementById('newCount').textContent=c.new_count||0;document.getElementById('disappearedCount').textContent=c.disappeared_count||0;
-  currentChanges=latest?await fetchAllChanges(latest.id):[];document.getElementById('compareText').textContent=latest?`${latest.snapshot_date} 與前一份快照比較`:'尚無兩份快照';renderChanges();
+  clearStatus();
+  const {data,error}=await sb.rpc('get_dashboard');
+  if(error){showStatus('讀取資料失敗：'+error.message);return}
+  const latest=data?.latest;
+  document.getElementById('latestDate').textContent=latest?.snapshot_date||'—';
+  document.getElementById('latestFile').textContent=latest?.source_file_name||'';
+  currentChanges=latest?await fetchAllChanges(latest.id):[];
+  populateWarehouseSelect('warehouse',currentChanges);
+  renderWarehouseSummary();
+  renderChanges();
 }
 async function fetchAllChanges(snapshotId){
   const out=[];let from=0,page=1000;
@@ -452,8 +487,8 @@ async function refreshAgentStatus(){
 }
 function filteredChanges(){
   const q=document.getElementById('search').value.trim().toLowerCase(),type=document.getElementById('type').value,rating=document.getElementById('rating').value.trim().toLowerCase(),wh=document.getElementById('warehouse').value.trim().toLowerCase(),bin=document.getElementById('storageBin').value.trim().toLowerCase(),sortBy=document.getElementById('sortBy').value;
-  const data=currentChanges.filter(x=>(!q||(x.part_no||'').toLowerCase().includes(q)||(x.material_name||'').toLowerCase().includes(q))&&(!type||x.change_type===type)&&(!rating||(x.rating||'').toLowerCase().includes(rating))&&(!wh||(x.warehouse||'').toLowerCase().includes(wh))&&(!bin||(x.storage_bin||'').toLowerCase().includes(bin)));
-  data.sort((a,b)=>{if(sortBy==='part_no')return String(a.part_no||'').localeCompare(String(b.part_no||''),undefined,{numeric:true})||String(a.storage_bin||'').localeCompare(String(b.storage_bin||''),undefined,{numeric:true});
+  const data=currentChanges.filter(x=>(!q||(x.part_no||'').toLowerCase().includes(q)||(x.material_name||'').toLowerCase().includes(q))&&(!type||x.change_type===type)&&(!rating||(x.rating||'').toLowerCase().includes(rating))&&(!wh||(x.warehouse||'').toLowerCase()===wh)&&(!bin||(x.storage_bin||'').toLowerCase().includes(bin)));
+  data.sort((a,b)=>{if(sortBy==='warehouse')return String(a.warehouse||'').localeCompare(String(b.warehouse||''),undefined,{numeric:true,sensitivity:'base'})||String(a.storage_bin||'').localeCompare(String(b.storage_bin||''),undefined,{numeric:true})||String(a.part_no||'').localeCompare(String(b.part_no||''),undefined,{numeric:true});if(sortBy==='part_no')return String(a.part_no||'').localeCompare(String(b.part_no||''),undefined,{numeric:true})||String(a.storage_bin||'').localeCompare(String(b.storage_bin||''),undefined,{numeric:true});
     if(sortBy==='delta_desc')return Number(b.quantity_delta||0)-Number(a.quantity_delta||0);
     if(sortBy==='delta_asc')return Number(a.quantity_delta||0)-Number(b.quantity_delta||0);
     return String(a.storage_bin||'').localeCompare(String(b.storage_bin||''),undefined,{numeric:true})||String(a.part_no||'').localeCompare(String(b.part_no||''),undefined,{numeric:true})});
@@ -476,7 +511,7 @@ async function importFile(file){
     const date=inferSnapshotDate(file);if(!date)throw new Error('檔名沒有可辨識的 YYYYMMDD 日期。請使用例如 20260924全.xlsx、2026-09-24.xlsx 或 2026_09_24.xlsx。');
     const hash=await sha256(file);showStatus(`已解析 ${rows.length.toLocaleString()} 筆，正在寫入中央資料庫…`);
     const {data,error}=await sb.rpc('import_inventory_snapshot',{p_snapshot_date:date,p_source_file_name:file.name,p_source_file_hash:hash,p_rows:rows});if(error)throw error;
-    document.getElementById('modalBody').innerHTML=`<p>匯入成功。</p><p>日期：<b>${esc(date)}</b><br>有效資料筆數：<b>${fmt(data.row_count)}</b><br>本次產生異動：<b>${fmt(data.change_count)}</b></p>`;
+    const importedWarehouses=[...new Set(rows.map(x=>x.warehouse).filter(Boolean))].sort();document.getElementById('modalBody').innerHTML=`<p>匯入成功。</p><p>日期：<b>${esc(date)}</b><br>有效資料筆數：<b>${fmt(data.row_count)}</b><br>本次產生異動：<b>${fmt(data.change_count)}</b><br>包含倉庫：<b>${esc(importedWarehouses.join('、')||'—')}</b></p>`;
     document.getElementById('modal').classList.remove('hidden');showStatus('匯入完成，資料已寫入中央 PostgreSQL。',true);await refreshDashboard();
   }catch(e){showStatus('匯入失敗：'+(e.message||e))}
 }
@@ -533,7 +568,7 @@ document.getElementById('refreshBtn').onclick=async()=>{await refreshDashboard()
 document.getElementById('loadHistory').onclick=async()=>{await loadSnapshotDates();await loadHistory()};document.getElementById('loadTimeline').onclick=loadHistoryTimeline;document.getElementById('exportHistory').onclick=exportHistory;document.getElementById('exportBtn').onclick=exportChanges;document.getElementById('refreshAgent').onclick=refreshAgentStatus;
 document.getElementById('importBtn').onclick=()=>document.getElementById('fileInput').click();document.getElementById('fileInput').onchange=e=>{importFile(e.target.files[0]);e.target.value=''};
 document.getElementById('closeModal').onclick=()=>document.getElementById('modal').classList.add('hidden');document.getElementById('closeTimeline').onclick=()=>document.getElementById('timelineModal').classList.add('hidden');document.getElementById('timelineModal').addEventListener('click',e=>{if(e.target.id==='timelineModal')e.currentTarget.classList.add('hidden')});
-['search','type','rating','warehouse','storageBin','sortBy'].forEach(id=>document.getElementById(id).addEventListener('input',renderChanges));['historySearch','historyRating','historyWarehouse','historyBin'].forEach(id=>document.getElementById(id).addEventListener('input',renderHistory));document.getElementById('historyOnlyChanges').addEventListener('change',()=>{
+['search','type','rating','storageBin','sortBy'].forEach(id=>document.getElementById(id).addEventListener('input',renderChanges));document.getElementById('warehouse').addEventListener('change',()=>{renderWarehouseSummary();renderChanges()});['historySearch','historyRating','historyWarehouse','historyBin'].forEach(id=>document.getElementById(id).addEventListener('input',renderHistory));document.getElementById('historyOnlyChanges').addEventListener('change',()=>{
   if(!currentHistory.length){loadHistoryTimeline();return}
   const start=document.getElementById('historyStart').value,end=document.getElementById('historyEnd').value;
   document.getElementById('historyStatus').textContent=`已載入 ${start} ～ ${end}，共 ${currentHistory.length.toLocaleString()} 筆歷史資料；目前${document.getElementById('historyOnlyChanges').checked?'僅顯示有變化':'顯示全部'}。`;
