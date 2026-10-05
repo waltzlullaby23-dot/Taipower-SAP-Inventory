@@ -144,7 +144,7 @@ th{position:sticky;top:0;background:#eef3f8;z-index:1}.badge{padding:4px 8px;bor
 <script src="config.js"></script>
 <script>
 const cfg=window.MATERIALMIND_CONFIG||{};
-let sb=null,currentUser=null,currentChanges=[],currentRole='viewer',snapshotDates=[],currentHistory=[];
+let sb=null,currentUser=null,currentChanges=[],currentRole='viewer',snapshotDates=[],currentHistory=[],warehouseSnapshots=[];
 let recoveryModeActive=false;
 let recoveryIntentFromUrl=false;
 
@@ -364,6 +364,11 @@ function warehouseScopedChanges(){
   const wh=document.getElementById('warehouse').value.trim().toLowerCase();
   return wh?currentChanges.filter(x=>String(x.warehouse||'').trim().toLowerCase()===wh):currentChanges;
 }
+function getSelectedWarehouseSnapshot(){
+  const wh=document.getElementById('warehouse').value.trim().toLowerCase();
+  if(!wh)return null;
+  return warehouseSnapshots.find(x=>String(x.warehouse||'').trim().toLowerCase()===wh)||null;
+}
 function renderWarehouseSummary(){
   const rows=warehouseScopedChanges();
   const counts={increase:0,decrease:0,new:0,disappeared:0};
@@ -374,9 +379,58 @@ function renderWarehouseSummary(){
   document.getElementById('decreaseCount').textContent=counts.decrease.toLocaleString();
   document.getElementById('newCount').textContent=counts.new.toLocaleString();
   document.getElementById('disappearedCount').textContent=counts.disappeared.toLocaleString();
-  const latest=document.getElementById('latestDate').textContent;
   const wh=document.getElementById('warehouse').value;
-  document.getElementById('compareText').textContent=latest&&latest!=='—'?`${latest} 與各倉庫前一份可用快照比較｜${wh?'目前倉庫：'+wh:'目前：全部倉庫'}`:'尚無兩份快照';
+  const selected=getSelectedWarehouseSnapshot();
+  if(selected){
+    document.getElementById('latestDate').textContent=selected.snapshot_date||'—';
+    document.getElementById('latestFile').textContent=selected.source_file_name||'';
+    document.getElementById('compareText').textContent=`${selected.snapshot_date} 與 ${wh} 前一份可用快照比較｜目前倉庫：${wh}`;
+  }else{
+    const overallDate=warehouseSnapshots.reduce((best,x)=>!best||String(x.snapshot_date)>String(best)?String(x.snapshot_date):best,'');
+    const overallFiles=[...new Set(warehouseSnapshots.filter(x=>String(x.snapshot_date)===overallDate).map(x=>x.source_file_name).filter(Boolean))];
+    document.getElementById('latestDate').textContent=overallDate||'—';
+    document.getElementById('latestFile').textContent=overallFiles.join('、');
+    document.getElementById('compareText').textContent=overallDate?`${overallDate} 各倉庫分別與各自前一份可用快照比較｜目前：全部倉庫`:'尚無兩份快照';
+  }
+}
+async function fetchAllWarehouseSnapshots(){
+  const {data:snapshots,error:snapError}=await sb.from('inventory_snapshots')
+    .select('id,snapshot_date,source_file_name,row_count,imported_at')
+    .order('snapshot_date',{ascending:false}).order('imported_at',{ascending:false}).limit(1000);
+  if(snapError)throw snapError;
+  const snapshotList=snapshots||[];
+  const byId=new Map(snapshotList.map(x=>[x.id,x]));
+  const warehouses=[];
+  let from=0,page=1000;
+  while(true){
+    const {data,error}=await sb.from('inventory_snapshot_rows').select('snapshot_id,warehouse').not('warehouse','is',null).range(from,from+page-1);
+    if(error)throw error;
+    warehouses.push(...(data||[]));
+    if(!data||data.length<page)break;
+    from+=page;
+  }
+  const latestByWarehouse=new Map();
+  for(const row of warehouses){
+    const wh=String(row.warehouse||'').trim();
+    const snap=byId.get(row.snapshot_id);
+    if(!wh||!snap)continue;
+    const key=wh.toLowerCase();
+    const existing=latestByWarehouse.get(key);
+    if(!existing || String(snap.snapshot_date)>String(existing.snapshot_date) || (String(snap.snapshot_date)===String(existing.snapshot_date)&&String(snap.imported_at)>String(existing.imported_at))){
+      latestByWarehouse.set(key,{warehouse:wh,snapshot_id:snap.id,snapshot_date:snap.snapshot_date,source_file_name:snap.source_file_name,row_count:snap.row_count,imported_at:snap.imported_at});
+    }
+  }
+  warehouseSnapshots=[...latestByWarehouse.values()].sort((a,b)=>String(a.warehouse).localeCompare(String(b.warehouse),undefined,{numeric:true,sensitivity:'base'}));
+  populateWarehouseSelect('warehouse',warehouseSnapshots.map(x=>({warehouse:x.warehouse})));
+  return warehouseSnapshots;
+}
+async function refreshWarehouseChanges(){
+  const selected=document.getElementById('warehouse').value.trim().toLowerCase();
+  const targets=selected?warehouseSnapshots.filter(x=>String(x.warehouse||'').trim().toLowerCase()===selected):warehouseSnapshots;
+  const ids=targets.map(x=>x.snapshot_id).filter(Boolean);
+  currentChanges=ids.length?await fetchAllChangesForSnapshotIds(ids):[];
+  renderWarehouseSummary();
+  renderChanges();
 }
 function filteredHistory(){
   const q=document.getElementById('historySearch').value.trim().toLowerCase();
@@ -464,25 +518,23 @@ async function refreshDashboard(){
   clearStatus();
   const {data,error}=await sb.rpc('get_dashboard');
   if(error){showStatus('讀取資料失敗：'+error.message);return}
-  const latest=data?.latest;
-  document.getElementById('latestDate').textContent=latest?.snapshot_date||'—';
-  document.getElementById('latestFile').textContent=latest?.source_file_name||'';
-  currentChanges=latest?.snapshot_date?await fetchAllChangesForDate(latest.snapshot_date):[];
-  populateWarehouseSelect('warehouse',currentChanges);
-  renderWarehouseSummary();
-  renderChanges();
+  try{
+    await fetchAllWarehouseSnapshots();
+    await refreshWarehouseChanges();
+  }catch(e){
+    showStatus('讀取分倉資料失敗：'+(e.message||e));
+    currentChanges=[];
+    renderWarehouseSummary();
+    renderChanges();
+  }
 }
-async function fetchAllChangesForDate(snapshotDate){
-  if(!snapshotDate)return [];
-  const {data:snapshots,error:snapError}=await sb.from('inventory_snapshots')
-    .select('id').eq('snapshot_date',snapshotDate);
-  if(snapError){showStatus('讀取同日快照失敗：'+snapError.message);return []}
-  const ids=(snapshots||[]).map(x=>x.id);
-  if(!ids.length)return [];
+async function fetchAllChangesForSnapshotIds(ids){
+  const unique=[...new Set((ids||[]).filter(Boolean))];
+  if(!unique.length)return [];
   const out=[];let from=0,page=1000;
   while(true){
     const {data,error}=await sb.from('inventory_changes').select('*')
-      .in('to_snapshot_id',ids).order('warehouse').order('storage_bin').order('part_no')
+      .in('to_snapshot_id',unique).order('warehouse').order('storage_bin').order('part_no')
       .range(from,from+page-1);
     if(error){showStatus('讀取異動資料失敗：'+error.message);return out}
     out.push(...(data||[]));
@@ -490,6 +542,12 @@ async function fetchAllChangesForDate(snapshotDate){
     from+=page;
   }
   return out;
+}
+async function fetchAllChangesForDate(snapshotDate){
+  if(!snapshotDate)return [];
+  const {data:snapshots,error}=await sb.from('inventory_snapshots').select('id').eq('snapshot_date',snapshotDate);
+  if(error){showStatus('讀取同日快照失敗：'+error.message);return []}
+  return fetchAllChangesForSnapshotIds((snapshots||[]).map(x=>x.id));
 }
 async function refreshAgentStatus(){
   const {data,error}=await sb.from('agent_status').select('*').order('updated_at',{ascending:false}).limit(20);
@@ -537,43 +595,58 @@ async function exportChanges(){
   const data=filteredChanges();
   if(!data.length){showStatus('目前篩選條件沒有可匯出的異動資料。');return}
 
-  // 取得本次比較的實際兩個快照日期，避免 Excel 只顯示「昨日／今日」而無法判斷比較區間。
-  let previousDate='', currentDate='';
+  const snapshotIds=[...new Set(data.flatMap(x=>[x.from_snapshot_id,x.to_snapshot_id]).filter(Boolean))];
+  const dateMap=new Map();
   try{
-    const {data:snapshots,error}=await sb.from('inventory_snapshots')
-      .select('snapshot_date')
-      .order('snapshot_date',{ascending:false})
-      .limit(2);
-    if(error)throw error;
-    const dates=(snapshots||[]).map(x=>String(x.snapshot_date)).filter(Boolean);
-    currentDate=dates[0]||'';
-    previousDate=dates[1]||'';
+    if(snapshotIds.length){
+      const {data:snapshots,error}=await sb.from('inventory_snapshots').select('id,snapshot_date').in('id',snapshotIds);
+      if(error)throw error;
+      (snapshots||[]).forEach(x=>dateMap.set(x.id,String(x.snapshot_date||'')));
+    }
   }catch(e){
-    // 若日期查詢失敗，仍允許匯出，不中斷使用者工作。
-    showStatus('已匯出，但無法取得比較日期：'+(e.message||e));
+    showStatus('已準備匯出，但取得比較日期失敗：'+(e.message||e));
   }
 
-  const previousHeader=previousDate?`昨日庫存 (${previousDate})`:'昨日庫存';
-  const currentHeader=currentDate?`今日庫存 (${currentDate})`:'今日庫存';
-  const compareDate=previousDate&&currentDate?`${previousDate} → ${currentDate}`:(currentDate||previousDate||'');
+  const selected=getSelectedWarehouseSnapshot();
+  const rows=data.map(x=>{
+    const previousDate=dateMap.get(x.from_snapshot_id)||'';
+    const currentDate=dateMap.get(x.to_snapshot_id)||'';
+    return {
+      _previousDate:previousDate,
+      _currentDate:currentDate,
+      比較日期:previousDate&&currentDate?`${previousDate} → ${currentDate}`:(currentDate||previousDate||'')
+    };
+  });
 
-  const out=data.map(x=>({
-    比較日期:compareDate,
-    狀態:{increase:'增加',decrease:'減少',new:'新增',disappeared:'消失'}[x.change_type]||x.change_type,
-    物料編號:x.part_no,
-    材料名稱:x.material_name,
-    評價:x.rating,
-    儲存地點:x.warehouse,
-    儲格:x.storage_bin||'',
-    [previousHeader]:x.previous_quantity,
-    [currentHeader]:x.current_quantity,
-    差異:x.quantity_delta,
-    安全庫存:x.safety_stock
-  }));
+  let previousHeader='昨日庫存',currentHeader='今日庫存';
+  if(selected){
+    const dates=[...new Set(rows.flatMap(x=>[x._previousDate,x._currentDate]).filter(Boolean))].sort();
+    const previousDate=dates.length>1?dates[0]:rows.find(x=>x._previousDate)?._previousDate||'';
+    const currentDate=String(selected.snapshot_date||rows.find(x=>x._currentDate)?._currentDate||'');
+    previousHeader=previousDate?`昨日庫存 (${previousDate})`:'昨日庫存';
+    currentHeader=currentDate?`今日庫存 (${currentDate})`:'今日庫存';
+  }
+
+  const out=data.map((x,i)=>{
+    const r=rows[i];
+    return {
+      比較日期:r.比較日期,
+      狀態:{increase:'增加',decrease:'減少',new:'新增',disappeared:'消失'}[x.change_type]||x.change_type,
+      物料編號:x.part_no,
+      材料名稱:x.material_name,
+      評價:x.rating,
+      儲存地點:x.warehouse,
+      儲格:x.storage_bin||'',
+      [previousHeader]:x.previous_quantity,
+      [currentHeader]:x.current_quantity,
+      差異:x.quantity_delta,
+      安全庫存:x.safety_stock
+    };
+  });
 
   const ws=XLSX.utils.json_to_sheet(out),wb=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb,ws,'材料異動');
-  const suffix=currentDate||new Date().toISOString().slice(0,10);
+  const suffix=selected?String(selected.snapshot_date||new Date().toISOString().slice(0,10)):'分倉';
   XLSX.writeFile(wb,`MaterialMind_材料異動_${suffix}.xlsx`);
 }
 document.getElementById('loginBtn').onclick=login;document.getElementById('resetBtn').onclick=resetPassword;document.getElementById('updatePasswordBtn').onclick=updatePassword;document.getElementById('logoutBtn').onclick=()=>sb.auth.signOut();
@@ -581,7 +654,7 @@ document.getElementById('refreshBtn').onclick=async()=>{await refreshDashboard()
 document.getElementById('loadHistory').onclick=async()=>{await loadSnapshotDates();await loadHistory()};document.getElementById('loadTimeline').onclick=loadHistoryTimeline;document.getElementById('exportHistory').onclick=exportHistory;document.getElementById('exportBtn').onclick=exportChanges;document.getElementById('refreshAgent').onclick=refreshAgentStatus;
 document.getElementById('importBtn').onclick=()=>document.getElementById('fileInput').click();document.getElementById('fileInput').onchange=e=>{importFile(e.target.files[0]);e.target.value=''};
 document.getElementById('closeModal').onclick=()=>document.getElementById('modal').classList.add('hidden');document.getElementById('closeTimeline').onclick=()=>document.getElementById('timelineModal').classList.add('hidden');document.getElementById('timelineModal').addEventListener('click',e=>{if(e.target.id==='timelineModal')e.currentTarget.classList.add('hidden')});
-['search','type','rating','storageBin','sortBy'].forEach(id=>document.getElementById(id).addEventListener('input',renderChanges));document.getElementById('warehouse').addEventListener('change',()=>{renderWarehouseSummary();renderChanges()});['historySearch','historyRating','historyWarehouse','historyBin'].forEach(id=>document.getElementById(id).addEventListener('input',renderHistory));document.getElementById('historyOnlyChanges').addEventListener('change',()=>{
+['search','type','rating','storageBin','sortBy'].forEach(id=>document.getElementById(id).addEventListener('input',renderChanges));document.getElementById('warehouse').addEventListener('change',async()=>{document.getElementById('warehouse').disabled=true;try{await refreshWarehouseChanges()}finally{document.getElementById('warehouse').disabled=false}});['historySearch','historyRating','historyWarehouse','historyBin'].forEach(id=>document.getElementById(id).addEventListener('input',renderHistory));document.getElementById('historyOnlyChanges').addEventListener('change',()=>{
   if(!currentHistory.length){loadHistoryTimeline();return}
   const start=document.getElementById('historyStart').value,end=document.getElementById('historyEnd').value;
   document.getElementById('historyStatus').textContent=`已載入 ${start} ～ ${end}，共 ${currentHistory.length.toLocaleString()} 筆歷史資料；目前${document.getElementById('historyOnlyChanges').checked?'僅顯示有變化':'顯示全部'}。`;
