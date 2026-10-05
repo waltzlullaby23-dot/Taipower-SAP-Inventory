@@ -376,7 +376,7 @@ function renderWarehouseSummary(){
   document.getElementById('disappearedCount').textContent=counts.disappeared.toLocaleString();
   const latest=document.getElementById('latestDate').textContent;
   const wh=document.getElementById('warehouse').value;
-  document.getElementById('compareText').textContent=latest&&latest!=='—'?`${latest} 與前一份快照比較｜${wh?'目前倉庫：'+wh:'目前：全部倉庫'}`:'尚無兩份快照';
+  document.getElementById('compareText').textContent=latest&&latest!=='—'?`${latest} 與各倉庫前一份可用快照比較｜${wh?'目前倉庫：'+wh:'目前：全部倉庫'}`:'尚無兩份快照';
 }
 function filteredHistory(){
   const q=document.getElementById('historySearch').value.trim().toLowerCase();
@@ -467,16 +467,29 @@ async function refreshDashboard(){
   const latest=data?.latest;
   document.getElementById('latestDate').textContent=latest?.snapshot_date||'—';
   document.getElementById('latestFile').textContent=latest?.source_file_name||'';
-  currentChanges=latest?await fetchAllChanges(latest.id):[];
+  currentChanges=latest?.snapshot_date?await fetchAllChangesForDate(latest.snapshot_date):[];
   populateWarehouseSelect('warehouse',currentChanges);
   renderWarehouseSummary();
   renderChanges();
 }
-async function fetchAllChanges(snapshotId){
+async function fetchAllChangesForDate(snapshotDate){
+  if(!snapshotDate)return [];
+  const {data:snapshots,error:snapError}=await sb.from('inventory_snapshots')
+    .select('id').eq('snapshot_date',snapshotDate);
+  if(snapError){showStatus('讀取同日快照失敗：'+snapError.message);return []}
+  const ids=(snapshots||[]).map(x=>x.id);
+  if(!ids.length)return [];
   const out=[];let from=0,page=1000;
-  while(true){const {data,error}=await sb.from('inventory_changes').select('*').eq('to_snapshot_id',snapshotId).order('storage_bin').order('part_no').range(from,from+page-1);
-    if(error){showStatus('讀取異動資料失敗：'+error.message);return out}out.push(...(data||[]));if(!data||data.length<page)break;from+=page}
-  return out
+  while(true){
+    const {data,error}=await sb.from('inventory_changes').select('*')
+      .in('to_snapshot_id',ids).order('warehouse').order('storage_bin').order('part_no')
+      .range(from,from+page-1);
+    if(error){showStatus('讀取異動資料失敗：'+error.message);return out}
+    out.push(...(data||[]));
+    if(!data||data.length<page)break;
+    from+=page;
+  }
+  return out;
 }
 async function refreshAgentStatus(){
   const {data,error}=await sb.from('agent_status').select('*').order('updated_at',{ascending:false}).limit(20);
