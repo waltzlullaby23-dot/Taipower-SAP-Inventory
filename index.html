@@ -100,6 +100,24 @@ th{position:sticky;top:0;background:#eef3f8;z-index:1}.badge{padding:4px 8px;bor
     <div style="padding:10px 16px;border-top:1px solid var(--line)" class="small" id="resultCount"></div>
   </section>
 
+  <section class="panel" id="inventoryPanel">
+    <div class="panel-head">
+      <div><b>各倉庫完整庫存明細</b><div class="small" id="inventoryStatus">依每個倉庫最新快照顯示全部材料，不限於有異動的材料。</div></div>
+      <button id="refreshInventory">更新庫存明細</button>
+    </div>
+    <div class="filters" style="padding:12px 16px;display:flex;gap:10px;flex-wrap:wrap">
+      <select id="inventoryWarehouse" title="庫存明細倉庫"><option value="">全部倉庫</option></select>
+      <input id="inventorySearch" placeholder="搜尋料號／材料名稱">
+      <input id="inventoryRating" placeholder="評價">
+      <input id="inventoryBin" placeholder="儲格">
+    </div>
+    <div class="table-wrap" style="max-height:65vh">
+      <table><thead><tr><th>快照日期</th><th>倉庫</th><th>物料編號</th><th>材料名稱</th><th>評價</th><th>儲格</th><th>庫存量</th><th>安全庫存</th></tr></thead>
+      <tbody id="inventoryRows"><tr><td colspan="8" class="small">登入後自動載入各倉庫最新庫存。</td></tr></tbody></table>
+    </div>
+    <div style="padding:10px 16px;border-top:1px solid var(--line)" class="small" id="inventoryCount"></div>
+  </section>
+
   <section class="panel" id="historyTimelinePanel">
     <div class="panel-head">
       <div><b>逐日歷史庫存時間軸</b><div class="small">以「基準日」為起點，逐日比較料號＋評價＋倉庫＋儲格；可查看新增、增加、減少、消失與未變化。</div></div>
@@ -144,7 +162,7 @@ th{position:sticky;top:0;background:#eef3f8;z-index:1}.badge{padding:4px 8px;bor
 <script src="config.js"></script>
 <script>
 const cfg=window.MATERIALMIND_CONFIG||{};
-let sb=null,currentUser=null,currentChanges=[],currentRole='viewer',snapshotDates=[],currentHistory=[],warehouseSnapshots=[];
+let sb=null,currentUser=null,currentChanges=[],currentRole='viewer',snapshotDates=[],currentHistory=[],warehouseSnapshots=[],latestInventoryRows=[];
 let recoveryModeActive=false;
 let recoveryIntentFromUrl=false;
 
@@ -422,6 +440,7 @@ async function fetchAllWarehouseSnapshots(){
   }
   warehouseSnapshots=[...latestByWarehouse.values()].sort((a,b)=>String(a.warehouse).localeCompare(String(b.warehouse),undefined,{numeric:true,sensitivity:'base'}));
   populateWarehouseSelect('warehouse',warehouseSnapshots.map(x=>({warehouse:x.warehouse})));
+  populateWarehouseSelect('inventoryWarehouse',warehouseSnapshots.map(x=>({warehouse:x.warehouse})));
   return warehouseSnapshots;
 }
 async function refreshWarehouseChanges(){
@@ -432,6 +451,44 @@ async function refreshWarehouseChanges(){
   renderWarehouseSummary();
   renderChanges();
 }
+async function loadLatestInventory(){
+  const all=[];
+  for(const snap of warehouseSnapshots){
+    let from=0,page=1000;
+    while(true){
+      const {data,error}=await sb.from('inventory_snapshot_rows')
+        .select('snapshot_id,part_no,material_name,rating,warehouse,storage_bin,quantity,safety_stock')
+        .eq('snapshot_id',snap.snapshot_id).eq('warehouse',snap.warehouse)
+        .order('storage_bin').order('part_no').range(from,from+page-1);
+      if(error)throw error;
+      for(const row of (data||[])) all.push({...row,snapshot_date:snap.snapshot_date,source_file_name:snap.source_file_name});
+      if(!data||data.length<page)break;
+      from+=page;
+    }
+  }
+  latestInventoryRows=all;
+  renderInventory();
+}
+function filteredInventory(){
+  const wh=document.getElementById('inventoryWarehouse').value.trim().toLowerCase();
+  const q=document.getElementById('inventorySearch').value.trim().toLowerCase();
+  const rating=document.getElementById('inventoryRating').value.trim().toLowerCase();
+  const bin=document.getElementById('inventoryBin').value.trim().toLowerCase();
+  return latestInventoryRows.filter(x=>(!wh||String(x.warehouse||'').trim().toLowerCase()===wh)
+    &&(!q||String(x.part_no||'').toLowerCase().includes(q)||String(x.material_name||'').toLowerCase().includes(q))
+    &&(!rating||String(x.rating||'').toLowerCase().includes(rating))
+    &&(!bin||String(x.storage_bin||'').toLowerCase().includes(bin)));
+}
+function renderInventory(){
+  const data=filteredInventory();
+  document.getElementById('inventoryRows').innerHTML=data.length?data.map(x=>`<tr><td>${esc(x.snapshot_date)}</td><td>${esc(x.warehouse)}</td><td>${esc(x.part_no)}</td><td>${esc(x.material_name||'')}</td><td>${esc(x.rating||'')}</td><td>${esc(x.storage_bin||'')}</td><td>${fmt(x.quantity)}</td><td>${fmt(x.safety_stock)}</td></tr>`).join(''):'<tr><td colspan="8" class="small">目前條件沒有庫存資料。</td></tr>';
+  const qty=data.reduce((sum,x)=>sum+Number(x.quantity||0),0);
+  const warehouses=[...new Set(data.map(x=>x.warehouse))];
+  document.getElementById('inventoryCount').textContent=`目前顯示 ${data.length.toLocaleString()} 筆材料｜倉別 ${warehouses.length} 個｜庫存量合計 ${fmt(qty)}`;
+  const status=warehouseSnapshots.map(x=>`${x.warehouse}：${x.snapshot_date}`).join('；');
+  document.getElementById('inventoryStatus').textContent=status?`各倉庫分別使用最新快照：${status}`:'目前沒有可用快照。';
+}
+
 function filteredHistory(){
   const q=document.getElementById('historySearch').value.trim().toLowerCase();
   const rating=document.getElementById('historyRating').value.trim().toLowerCase();
@@ -521,6 +578,7 @@ async function refreshDashboard(){
   try{
     await fetchAllWarehouseSnapshots();
     await refreshWarehouseChanges();
+    await loadLatestInventory();
   }catch(e){
     showStatus('讀取分倉資料失敗：'+(e.message||e));
     currentChanges=[];
@@ -582,7 +640,9 @@ async function importFile(file){
     const date=inferSnapshotDate(file);if(!date)throw new Error('檔名沒有可辨識的 YYYYMMDD 日期。請使用例如 20260924全.xlsx、2026-09-24.xlsx 或 2026_09_24.xlsx。');
     const hash=await sha256(file);showStatus(`已解析 ${rows.length.toLocaleString()} 筆，正在寫入中央資料庫…`);
     const {data,error}=await sb.rpc('import_inventory_snapshot',{p_snapshot_date:date,p_source_file_name:file.name,p_source_file_hash:hash,p_rows:rows});if(error)throw error;
-    const importedWarehouses=[...new Set(rows.map(x=>x.warehouse).filter(Boolean))].sort();document.getElementById('modalBody').innerHTML=`<p>匯入成功。</p><p>日期：<b>${esc(date)}</b><br>有效資料筆數：<b>${fmt(data.row_count)}</b><br>本次產生異動：<b>${fmt(data.change_count)}</b><br>包含倉庫：<b>${esc(importedWarehouses.join('、')||'—')}</b></p>`;
+    const byWarehouse=new Map();for(const row of rows){const wh=String(row.warehouse||'').trim()||'未識別倉庫';byWarehouse.set(wh,(byWarehouse.get(wh)||0)+1)}
+    const warehouseSummary=[...byWarehouse.entries()].sort((a,b)=>a[0].localeCompare(b[0],undefined,{numeric:true,sensitivity:'base'})).map(([wh,count])=>`${wh}：${fmt(count)} 筆`).join('、');
+    const importedWarehouses=[...byWarehouse.keys()];document.getElementById('modalBody').innerHTML=`<p>匯入成功。</p><p>日期：<b>${esc(date)}</b><br>有效資料筆數：<b>${fmt(data.row_count)}</b><br>本次產生異動：<b>${fmt(data.change_count)}</b><br>自動辨識倉庫：<b>${importedWarehouses.length} 個</b><br>各倉筆數：<b>${esc(warehouseSummary||'—')}</b></p><p class="small">系統依每筆資料的「儲存地點／倉庫」欄位自動分倉，不需要一個倉庫匯入一個檔案。</p>`;
     document.getElementById('modal').classList.remove('hidden');showStatus('匯入完成，資料已寫入中央 PostgreSQL。',true);await refreshDashboard();
   }catch(e){showStatus('匯入失敗：'+(e.message||e))}
 }
@@ -651,6 +711,9 @@ async function exportChanges(){
 }
 document.getElementById('loginBtn').onclick=login;document.getElementById('resetBtn').onclick=resetPassword;document.getElementById('updatePasswordBtn').onclick=updatePassword;document.getElementById('logoutBtn').onclick=()=>sb.auth.signOut();
 document.getElementById('refreshBtn').onclick=async()=>{await refreshDashboard();await refreshAgentStatus();await loadSnapshotDates()};
+document.getElementById('refreshInventory').onclick=async()=>{try{await loadLatestInventory();showStatus('各倉庫最新庫存明細已更新。',true)}catch(e){showStatus('更新庫存明細失敗：'+(e.message||e))}};
+['inventorySearch','inventoryRating','inventoryBin'].forEach(id=>document.getElementById(id).addEventListener('input',renderInventory));
+document.getElementById('inventoryWarehouse').addEventListener('change',renderInventory);
 document.getElementById('loadHistory').onclick=async()=>{await loadSnapshotDates();await loadHistory()};document.getElementById('loadTimeline').onclick=loadHistoryTimeline;document.getElementById('exportHistory').onclick=exportHistory;document.getElementById('exportBtn').onclick=exportChanges;document.getElementById('refreshAgent').onclick=refreshAgentStatus;
 document.getElementById('importBtn').onclick=()=>document.getElementById('fileInput').click();document.getElementById('fileInput').onchange=e=>{importFile(e.target.files[0]);e.target.value=''};
 document.getElementById('closeModal').onclick=()=>document.getElementById('modal').classList.add('hidden');document.getElementById('closeTimeline').onclick=()=>document.getElementById('timelineModal').classList.add('hidden');document.getElementById('timelineModal').addEventListener('click',e=>{if(e.target.id==='timelineModal')e.currentTarget.classList.add('hidden')});
